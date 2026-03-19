@@ -1,5 +1,3 @@
-"use client";
-;
 import { useState, useEffect } from "react";
 
 const theme = {
@@ -1153,4 +1151,3 @@ export default function App() {
     </>
   );
 }
-
