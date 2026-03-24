@@ -1283,6 +1283,69 @@ Favourite categories: Groceries, Electronics, Beauty.
 
 
 
+// ── useRealTimeLocation — live GPS with reverse geocoding ─────
+function useRealTimeLocation() {
+  const [location, setLocation] = React.useState({
+    lat: null, lng: null,
+    area: null, city: "Lagos",
+    loading: false, error: null, granted: false,
+  });
+
+  const reverseGeocode = async (lat, lng) => {
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`,
+        { headers: { "Accept-Language": "en" } }
+      );
+      const data = await res.json();
+      const addr = data.address || {};
+      const area = addr.suburb || addr.neighbourhood || addr.quarter ||
+                   addr.city_district || addr.town || addr.village || null;
+      const city = addr.city || addr.state_district || addr.state || "Lagos";
+      setLocation(prev => ({ ...prev, area, city, loading: false }));
+    } catch {
+      setLocation(prev => ({ ...prev, loading: false }));
+    }
+  };
+
+  const requestLocation = React.useCallback(() => {
+    if (!("geolocation" in navigator)) {
+      setLocation(prev => ({ ...prev, error: "GPS not supported", loading: false }));
+      return;
+    }
+    setLocation(prev => ({ ...prev, loading: true, error: null }));
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => {
+        const { latitude: lat, longitude: lng } = coords;
+        setLocation(prev => ({ ...prev, lat, lng, granted: true }));
+        reverseGeocode(lat, lng);
+      },
+      (err) => {
+        setLocation(prev => ({ ...prev, error: err.message, loading: false }));
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+    );
+  }, []);
+
+  // Watch position for live updates
+  React.useEffect(() => {
+    if (!("geolocation" in navigator)) return;
+    const watchId = navigator.geolocation.watchPosition(
+      ({ coords }) => {
+        const { latitude: lat, longitude: lng } = coords;
+        setLocation(prev => ({ ...prev, lat, lng, granted: true }));
+        reverseGeocode(lat, lng);
+      },
+      () => {},
+      { enableHighAccuracy: true, maximumAge: 30000 }
+    );
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, []);
+
+  return { ...location, requestLocation };
+}
+
+
 const CSS = (C) => `
 @import url('https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700&f[]=syne@600,700,800&display=swap');
 @import url('https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&display=swap');
@@ -1773,289 +1836,18 @@ function Auth({ onDone, C }) {
 
 
 // ── PredictiveInsightCard — Chowdeck-style top card on Home ──
-function PredictiveInsightCard({ goTo, addToCart, C }) {
-  const SUGGESTIONS = [
-    { name: "Basmati Rice 5kg",   store: "FoodMart",  price: 3200,  icon: "food",   reason: "You buy this every 2 weeks" },
-    { name: "Vitamin C Serum",    store: "GlowStore", price: 8500,  icon: "heart",  reason: "Last ordered 3 weeks ago" },
-    { name: "USB-C Fast Charger", store: "TechHub",   price: 3500,  icon: "zap",    reason: "Frequently reordered" },
-  ];
-  const toast = useToast();
-  const [dismissed, setDismissed] = useState(false);
-  if (dismissed) return null;
-
-  return (
-    <div style={{ margin: "0 20px 20px", background: C.dark ? "rgba(255,77,26,.07)" : "rgba(255,77,26,.05)", border: `1.5px solid ${C.accent}22`, borderRadius: 18, padding: "14px 16px", position: "relative", overflow: "hidden" }}>
-      {/* Ambient glow */}
-      <div style={{ position: "absolute", top: -20, right: -20, width: 120, height: 120, borderRadius: "50%", background: `radial-gradient(circle,${C.accentGlow},transparent 70%)`, pointerEvents: "none" }} />
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-          <span className="ai-badge">✦ Predicted</span>
-          <span style={{ fontSize: 13.5, fontWeight: 600, color: C.text }}>Reorder time?</span>
-        </div>
-        <button onClick={() => setDismissed(true)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 18, padding: "0 2px" }}>×</button>
-      </div>
-      <div style={{ display: "flex", gap: 10 }}>
-        {SUGGESTIONS.map((s, i) => (
-          <div key={i} style={{ flex: 1, background: C.dark ? "rgba(255,255,255,.04)" : "rgba(255,255,255,.8)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 10px", position: "relative" }}>
-            <div style={{ width: 36, height: 36, borderRadius: 11, background: C.accentBg, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 8 }}>
-              <Icon name={s.icon} size={18} color={C.accent} />
-            </div>
-            <div style={{ fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 2, lineHeight: 1.3 }}>{s.name}</div>
-            <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>{s.reason}</div>
-            <div className="mono" style={{ fontSize: 13, fontWeight: 700, color: C.accent, marginBottom: 8 }}>₦{s.price.toLocaleString()}</div>
-            <button onClick={() => { addToCart({ id: 900+i, name: s.name, price: s.price }); toast(`${s.name} added!`, "success"); }}
-              style={{ position: "absolute", top: 9, right: 9, width: 26, height: 26, borderRadius: 8, background: `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 3px 10px ${C.accentGlow}` }}>
-              <Icon name="plus" size={13} color="#fff" strokeWidth={2.5} />
-            </button>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 // ── AI RECOMMENDATIONS (shown on Home) ──────────────────────
-function AIRecommendations({ goTo, addToCart, C }) {
-  const toast = useToast();
-  const [recs, setRecs] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [dismissed, setDismissed] = useState(false);
-
-  useEffect(() => {
-    const run = async () => {
-      const system = APP_CONTEXT + "You are a personalized recommendation engine. Based on order history and preferences, return a JSON object with: recommendations (array of 4 objects with emoji/name/store/price/reason/category), insight (string). Return ONLY valid JSON, no markdown.";
-      try {
-        const data = await askClaude(system, "Recommend 3 products for this user based on their history.", true);
-        setRecs(data);
-      } catch(e) { setRecs(null); }
-      setLoading(false);
-    };
-    run();
-  }, []);
-
-  if (dismissed || (!loading && !recs)) return null;
-
-  return (
-    <div style={{ margin: "0 20px 22px", animation: loading ? "none" : "up .35s ease" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 11 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-          <span style={{ fontSize: 14 }}>✨</span>
-          <div className="disp" style={{ fontSize: 15, color: C.text }}>
-            {loading ? "Finding your picks…" : recs?.headline || "Just for you"}
-          </div>
-          <span style={{ fontSize: 12, fontWeight: 700, color: C.accent, background: C.accentBg, padding: "2px 6px", borderRadius: 5 }}>AI</span>
-        </div>
-        <button onClick={() => setDismissed(true)} style={{ color: C.muted, background: "none", border: "none", fontSize: 18, cursor: "pointer", lineHeight: 1 }}>×</button>
-      </div>
-
-      {loading ? (
-        <div style={{ display: "flex", gap: 10 }}>
-          {[1,2,3].map(i => <div key={i} style={{ flex: 1, height: 130, background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, animation: `shimmer 1.4s ${i*.2}s ease-in-out infinite` }} />)}
-        </div>
-      ) : (
-        <div style={{ display: "flex", gap: 10 }}>
-          {recs?.picks?.map((p, i) => (
-            <div key={i} style={{ flex: 1, background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 10px", position: "relative" }}>
-              <div style={{ fontSize: 32, textAlign: "center", marginBottom: 7 }}>{p.emoji}</div>
-              <div style={{ fontWeight: 600, fontSize: 12.5, color: C.text, marginBottom: 2, lineHeight: 1.3 }}>{p.name}</div>
-              <div style={{ color: C.muted, fontSize: 12, marginBottom: 7, fontStyle: "italic", lineHeight: 1.3 }}>{p.reason}</div>
-              <div className="disp" style={{ color: C.accent, fontSize: 13 }}>₦{Number(p.price).toLocaleString()}</div>
-              <button onClick={() => { addToCart({ id: 900+i, name: p.name, price: Number(p.price), emoji: p.emoji }); toast(`${p.name} added`, "🛒", "success"); }}
-                style={{ position: "absolute", top: 9, right: 9, width: 24, height: 24, borderRadius: 7, background: C.accent, border: "none", color: "#fff", fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>+</button>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 // ── AI REORDER SUGGESTIONS (shown in Cart when empty) ────────
-function AIReorderSuggestions({ addToCart, C }) {
-  const toast = useToast();
-  const [recs, setRecs] = useState(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const run = async () => {
-      const system = APP_CONTEXT + "You are a smart reorder engine. Analyse purchase history and suggest what to reorder. Return JSON with: suggestions (array of 4 objects with name/store/emoji/price/lastBought/frequency), message (string). Return ONLY valid JSON, no markdown.";
-      try {
-        const data = await askClaude(system, "What should this user reorder based on their history?", true);
-        setRecs(data);
-      } catch(e) { setRecs(null); }
-      setLoading(false);
-    };
-    run();
-  }, []);
-
-  if (!loading && !recs) return null;
-
-  return (
-    <div style={{ padding: "0 20px", animation: "up .35s ease" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 14 }}>
-        <span style={{ fontSize: 14 }}>🔁</span>
-        <div className="disp" style={{ fontSize: 15, color: C.text }}>
-          {loading ? "Checking your history…" : "Time to restock?"}
-        </div>
-        <span style={{ fontSize: 12, fontWeight: 700, color: C.accent, background: C.accentBg, padding: "2px 6px", borderRadius: 5 }}>AI</span>
-      </div>
-
-      {!loading && recs?.insight && (
-        <div style={{ background: C.dark ? "rgba(255,77,26,.08)" : "rgba(255,77,26,.06)", border: `1px solid ${C.accent}30`, borderRadius: 14, padding: "11px 14px", marginBottom: 14, fontSize: 13, color: C.text }}>
-          ✨ {recs.insight}
-        </div>
-      )}
-
-      {loading ? (
-        <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-          {[1,2,3].map(i => <div key={i} style={{ height: 72, background: C.card, borderRadius: 18, border: `1px solid ${C.border}`, animation: `shimmer 1.4s ${i*.15}s ease-in-out infinite` }} />)}
-        </div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-          {recs?.reorders?.map((r, i) => (
-            <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, background: C.card, border: `1px solid ${r.urgency === "high" ? C.accent+"44" : C.border}`, borderRadius: 13, padding: "12px 13px" }}>
-              <span style={{ fontSize: 26, flexShrink: 0 }}>{r.emoji}</span>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 500, fontSize: 14, color: C.text }}>{r.name}</div>
-                <div style={{ display: "flex", gap: 8, marginTop: 3, alignItems: "center" }}>
-                  <span style={{ color: C.muted, fontSize: 12 }}>Last: {r.lastBought}</span>
-                  {r.urgency === "high" && <span style={{ fontSize: 12, fontWeight: 700, color: C.accent, background: C.accentBg, padding: "1px 6px", borderRadius: 4 }}>Restock soon</span>}
-                </div>
-              </div>
-              <div style={{ textAlign: "right", flexShrink: 0 }}>
-                <div className="disp" style={{ color: C.text, fontSize: 14 }}>₦{Number(r.price).toLocaleString()}</div>
-                <button onClick={() => { addToCart({ id: 800+i, name: r.name, price: Number(r.price), emoji: r.emoji }); toast(`${r.name} added`, "🛒", "success"); }}
-                  style={{ marginTop: 5, padding: "5px 11px", background: C.accent, border: "none", borderRadius: 8, color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Re-add</button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 // ── AI ASSISTANT (floating chat bubble) ────────────────────
-function AIAssistant({ goTo, addToCart, C }) {
-  const toast = useToast();
-  const [open, setOpen] = useState(false);
-  const [msgs, setMsgs] = useState([
-    { role: "assistant", text: "Hi John! 👋 I'm Errand AI. I can help you find products, compare prices, plan your shopping, or answer anything about the app. What do you need?" }
-  ]);
-  const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const endRef = useRef(null);
-  const history = useRef([]);
-
-  useEffect(() => { if (open) endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs, open]);
-
-  const send = async () => {
-    if (!input.trim() || loading) return;
-    const userMsg = input.trim();
-    setInput("");
-    setMsgs(m => [...m, { role: "user", text: userMsg }]);
-    setLoading(true);
-
-    history.current.push({ role: "user", content: userMsg });
-
-    const system = APP_CONTEXT + "You are Errand AI — a helpful, friendly, concise shopping assistant. Help users find products, track orders, navigate the app, and answer questions about stores and delivery. Keep responses under 3 sentences. Be warm and Nigerian-friendly.";
-
-    try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 300,
-          system,
-          messages: history.current,
-        }),
-      });
-      const data = await res.json();
-      const reply = data.content?.map(b => b.text || "").join("") || "Sorry, I couldn't respond. Try again!";
-      history.current.push({ role: "assistant", content: reply });
-      setMsgs(m => [...m, { role: "assistant", text: reply }]);
-    } catch(e) {
-      setMsgs(m => [...m, { role: "assistant", text: "Network error — please try again! 🙏" }]);
-    }
-    setLoading(false);
-  };
-
-  const QUICK = ["What's on sale?", "Reorder my groceries", "Best earbuds under ₦25k", "What's my loyalty tier?"];
-
-  return (
-    <>
-      {/* Floating button */}
-      <div onClick={() => setOpen(o => !o)} style={{ position: "fixed", bottom: 96, right: 18, width: 54, height: 54, borderRadius: 17, background: `linear-gradient(135deg,${C.accent},#FF9500)`, boxShadow: `0 8px 28px ${C.accentGlow}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 400, fontSize: 24, transition: "transform .2s" }}
-        onMouseDown={e => e.currentTarget.style.transform = "scale(.9)"}
-        onMouseUp={e => e.currentTarget.style.transform = ""}
-        onMouseLeave={e => e.currentTarget.style.transform = ""}>
-        {open ? "×" : "✨"}
-        {!open && <div style={{ position: "absolute", top: -3, right: -3, width: 12, height: 12, borderRadius: "50%", background: C.green, border: `2px solid ${C.bg}` }} />}
-      </div>
-
-      {/* Chat panel */}
-      {open && (
-        <div style={{ position: "fixed", bottom: 158, right: 16, width: "min(360px, calc(100vw - 32px))", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 8px 40px rgba(0,0,0,.3)", zIndex: 400, display: "flex", flexDirection: "column", maxHeight: "60vh", animation: "up .25s ease" }}>
-          {/* Header */}
-          <div style={{ padding: "14px 16px 12px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ width: 34, height: 34, borderRadius: 10, background: C.accent, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17 }}>✨</div>
-            <div style={{ flex: 1 }}>
-              <div className="disp" style={{ fontSize: 14, color: C.text }}>Errand AI</div>
-              <div style={{ color: C.green, fontSize: 12 }}>● Always available</div>
-            </div>
-            <button onClick={() => setOpen(false)} style={{ color: C.muted, background: "none", border: "none", fontSize: 20, cursor: "pointer" }}>×</button>
-          </div>
-
-          {/* Messages */}
-          <div style={{ flex: 1, overflowY: "auto", padding: "12px 14px", display: "flex", flexDirection: "column", gap: 9, minHeight: 0 }}>
-            {msgs.map((m, i) => (
-              <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "88%", background: m.role === "user" ? C.accent : C.card, color: m.role === "user" ? "#fff" : C.text, borderRadius: 18, padding: "10px 14px", fontSize: 13.5, border: m.role !== "user" ? `1px solid ${C.border}` : "none", lineHeight: 1.55, display: "inline-block" }}>
-                {m.text}
-              </div>
-            ))}
-            {loading && (
-              <div style={{ alignSelf: "flex-start", display: "flex", gap: 5, padding: "10px 13px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 12 }}>
-                {[0,1,2].map(i => <div key={i} style={{ width: 6, height: 6, borderRadius: "50%", background: C.muted, animation: `blink 1.2s ${i*.2}s ease-in-out infinite` }} />)}
-              </div>
-            )}
-            <div ref={endRef} />
-          </div>
-
-          {/* Quick prompts (only when conversation is fresh) */}
-          {msgs.length === 1 && (
-            <div style={{ padding: "0 14px 10px", display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {QUICK.map(q => (
-                <button key={q} onClick={() => { setInput(q); setTimeout(() => send(), 0); }} style={{ padding: "5px 11px", background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 16, color: C.accent, fontSize: 12, fontWeight: 500, cursor: "pointer" }}>{q}</button>
-              ))}
-            </div>
-          )}
-
-          {/* Input */}
-          <div style={{ padding: "10px 12px 14px", borderTop: `1px solid ${C.border}`, display: "flex", gap: 8 }}>
-            <input
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && send()}
-              placeholder="Ask me anything…"
-              style={{ flex: 1, background: C.card, border: `1.5px solid ${C.border}`, borderRadius: 10, padding: "9px 12px", color: C.text, fontSize: 13.5, outline: "none" }}
-              onFocus={e => e.target.style.borderColor = C.accent}
-              onBlur={e => e.target.style.borderColor = C.border}
-            />
-            <button onClick={send} disabled={!input.trim() || loading}
-              style={{ width: 36, height: 36, borderRadius: 10, background: input.trim() && !loading ? C.accent : C.border, border: "none", color: "#fff", fontSize: 17, cursor: input.trim() && !loading ? "pointer" : "default", transition: "background .18s", display: "flex", alignItems: "center", justifyContent: "center" }}>→</button>
-          </div>
-        </div>
-      )}
-    </>
-  );
-}
-
 
 // ── HOME ────────────────────────────────────────────────────
 function Home({ goTo, cart, addToCart, C, dark, toggleDark }) {
   const notifBadge = useNotifBadge();
   const { cityData } = useCity();
+  const loc = useRealTimeLocation();
   const toast = useToast();
   const revealRef = useScrollReveal();
   const cartCount = cart.reduce((s, i) => s + i.qty, 0);
@@ -2090,21 +1882,22 @@ function Home({ goTo, cart, addToCart, C, dark, toggleDark }) {
       {/* Header */}
       <div style={{ padding: "56px 22px 18px", display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
         <div>
-          <div onClick={() => goTo("city-switcher")} style={{ display: "flex", alignItems: "center", gap: 5, color: C.sub, fontSize: 12, marginBottom: 6, cursor: "pointer" }}>
+          <div onClick={() => { if (!loc.granted) loc.requestLocation(); else goTo("city-switcher"); }} style={{ display: "flex", alignItems: "center", gap: 5, color: C.sub, fontSize: 12, marginBottom: 6, cursor: "pointer" }}>
             <Icon name="pin" size={12} color={C.accent} />
-            <span style={{ fontWeight: 600, color: C.text }}>{cityData?.name || "Lagos"}</span>
+            {loc.loading
+              ? <span style={{ color: C.muted, fontWeight: 500 }}>Finding location…</span>
+              : loc.area
+                ? <><span style={{ fontWeight: 700, color: C.text }}>{loc.area}</span><span style={{ color: C.muted }}>, {loc.city}</span></>
+                : <><span style={{ fontWeight: 600, color: C.text }}>{cityData?.name || "Lagos"}</span><span style={{ color: C.accent, fontSize: 11, marginLeft: 2 }}>tap to set</span></>
+            }
             <Icon name="down" size={10} color={C.accent} />
           </div>
           <div className="disp" style={{ fontSize: 30, color: C.text, lineHeight: 1.1, letterSpacing: "-0.04em" }}>
             Good morning, <span style={{ background: `linear-gradient(135deg,${C.accent},#FF9500)`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>John</span>
           </div>
-          <div style={{ fontSize: 13, color: C.sub, marginTop: 4, display: "flex", alignItems: "center", gap: 6 }}>
-            <span className="ai-badge">✦ AI</span>
-            <span>Your home is sorted for you</span>
-          </div>
+
         </div>
         <div style={{ display: "flex", gap: 8, paddingTop: 4, alignItems: "center" }}>
-          <ModeSwitcher C={C} />
           <button onClick={toggleDark} aria-label="Toggle dark mode" style={{ width: 44, height: 44, borderRadius: 13, background: C.card, border: `1px solid ${C.border}`, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name={dark ? "sun" : "moon"} size={18} color={C.sub} /></button>
           <button onClick={() => goTo("notifications")} style={{ width: 44, height: 44, borderRadius: 13, background: C.card, border: `1px solid ${C.border}`, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
             <Icon name="bell" size={20} color={C.text} />
@@ -2120,10 +1913,7 @@ function Home({ goTo, cart, addToCart, C, dark, toggleDark }) {
           onMouseLeave={e=>{ e.currentTarget.style.borderColor=C.border; e.currentTarget.style.boxShadow="none"; }}>
           <Icon name="search" size={18} color={C.sub} />
           <span style={{ color: C.muted, fontSize: 14.5, flex: 1, fontWeight: 400 }}>What do you need today?</span>
-          <div style={{ display: "flex", alignItems: "center", gap: 5, background: `linear-gradient(135deg,rgba(155,111,255,.15),rgba(255,77,26,.1))`, border: "1px solid rgba(155,111,255,.25)", borderRadius: 8, padding: "3px 9px" }}>
-            <Icon name="zap" size={10} color="#9B6FFF" />
-            <span style={{ fontSize: 12, fontWeight: 800, color: "#9B6FFF" }}>AI</span>
-          </div>
+          <Icon name="search" size={16} color={C.muted} />
         </div>
       </div>
 
@@ -2140,21 +1930,21 @@ function Home({ goTo, cart, addToCart, C, dark, toggleDark }) {
       </div>
 
       <FoldableHint C={C} />
-      <VoiceCommandPanel onCommand={goTo} C={C} />
       {/* Push permission banner - show once */}
       <PushPermissionBannerOnce goTo={goTo} C={C} />
       <PWAInstallBanner C={C} />
       {/* AI Recommendations */}
-      <PredictiveInsightCard goTo={goTo} addToCart={addToCart} C={C} />
-      <AIRecommendations goTo={goTo} addToCart={addToCart} C={C} />
 
-      {/* Quick actions — AI personalised & staggered */}
+      {/* Online Shoppers strip */}
+      <OnlineShoppersStrip goTo={goTo} C={C} />
+
+      {/* Quick actions — categorised */}
       <PersonalisedQuickActions goTo={goTo} C={C} />
 
       {/* Flash deals */}
       <div style={{ padding: "0 20px 22px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 13 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}><div className="disp" style={{ fontSize: 17, color: C.text }}>Flash Deals</div><span className="ai-badge">✦ LIVE</span></div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}><div className="disp" style={{ fontSize: 17, color: C.text }}>Flash Deals</div><span style={{ fontSize: 11, fontWeight: 800, color: C.green, background: C.greenBg, border: `1px solid ${C.green}33`, borderRadius: 8, padding: "2px 8px" }}>● LIVE</span></div>
           <div style={{ background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 8, padding: "3px 10px", fontSize: 12, fontWeight: 600, color: C.accent, fontVariantNumeric: "tabular-nums" }}>{fmtTime(t)}</div>
         </div>
         <div className="hrow">
@@ -2183,7 +1973,7 @@ function Home({ goTo, cart, addToCart, C, dark, toggleDark }) {
       {/* Open stores */}
       <div style={{ padding: "0 20px" }} ref={revealRef}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 13 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}><div className="disp" style={{ fontSize: 17, color: C.text }}>Open Now</div><span className="ai-badge">✦ AI sorted</span></div>
+          <div className="disp" style={{ fontSize: 17, color: C.text }}>Open Now</div>
           <span onClick={() => goTo("stores")} style={{ color: C.accent, fontSize: 13, fontWeight: 500, cursor: "pointer" }}>See all →</span>
         </div>
         <div className="hrow">
@@ -2197,7 +1987,6 @@ function Home({ goTo, cart, addToCart, C, dark, toggleDark }) {
           ))}
         </div>
       </div>
-      <PersonalizationDashboard C={C} goTo={goTo} />
     </div>
   );
 }
@@ -2254,11 +2043,7 @@ function Search({ goTo, C }) {
       <div style={{ padding: "0 20px" }}>
         {!q && (
           <>
-            {/* AI badge */}
-            <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 11, padding: "10px 13px", marginBottom: 20 }}>
-              <span style={{ fontSize: 16 }}>✨</span>
-              <span style={{ color: C.text, fontSize: 13 }}>Ask in plain English — <span style={{ color: C.accent, fontWeight: 600 }}>AI understands you</span></span>
-            </div>
+
             <div style={{ color: C.sub, fontSize: 12, fontWeight: 600, marginBottom: 10, letterSpacing: ".5px" }}>RECENT</div>
             {recent.map(r => (
               <div key={r} onClick={() => { setQ(r); runSearch(r); }} style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 0", borderBottom: `1px solid ${C.border}`, cursor: "pointer" }}>
@@ -2657,6 +2442,7 @@ function ShopperChat({ shopper, onBack, C }) {
 // ── TRACKING ─────────────────────────────────────────────────
 function Tracking({ goTo, C }) {
   const { status: liveStatus } = useTracking("demo_order_001");
+  const userLoc = useRealTimeLocation();
   const [step, setStep] = useState(2);
   const steps = [
     { label: "Placed",     icon: "receipt", time: "2:30 PM"      },
@@ -2835,7 +2621,6 @@ function Cart({ goTo, cart, setCart, addToCart, C }) {
             <div style={{ color: C.sub, fontSize: 14, marginBottom: 24 }}>Add items from stores or flash deals</div>
             <Btn C={C} onClick={() => goTo("stores")}>Browse Stores</Btn>
           </div>
-          <AIReorderSuggestions addToCart={addToCart} C={C} />
         </div>
       ) : (
         <div style={{ padding: "0 20px" }}>
@@ -5276,8 +5061,8 @@ function AdminVerificationQueue({ goTo, C }) {
 // ── useShopperMode ────────────────────────────────────────────
 const ShopperModeContext = React.createContext(null);
 function ShopperModeProvider({ children }) {
-  const [isShopperMode, setIsShopperMode] = useState(false);
-  const [shopperStatus, setShopperStatus] = useState("offline"); // offline | online | busy
+  const [isShopperMode, setIsShopperMode] = React.useState(false);
+  const [shopperStatus, setShopperStatus] = React.useState("offline");
   return (
     <ShopperModeContext.Provider value={{ isShopperMode, setIsShopperMode, shopperStatus, setShopperStatus }}>
       {children}
@@ -5287,29 +5072,6 @@ function ShopperModeProvider({ children }) {
 const useShopperMode = () => React.useContext(ShopperModeContext);
 
 // ── Mode Toggle Pill (shown in Home header) ───────────────────
-function ModeSwitcher({ C }) {
-  const { isShopperMode, setIsShopperMode, shopperStatus, setShopperStatus } = useShopperMode() || {};
-  const toast = useToast();
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      {isShopperMode && (
-        <div onClick={() => {
-          const next = shopperStatus === "offline" ? "online" : "offline";
-          setShopperStatus(next);
-          toast(next === "online" ? "You're online — ready for orders 🟢" : "Gone offline", next === "online" ? "🛵" : "😴", next === "online" ? "success" : undefined);
-        }} style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 11px", borderRadius: 20, background: shopperStatus === "online" ? C.greenBg : C.card, border: `1px solid ${shopperStatus === "online" ? C.green + "55" : C.border}`, cursor: "pointer" }}>
-          <div style={{ width: 7, height: 7, borderRadius: "50%", background: shopperStatus === "online" ? C.green : C.muted, animation: shopperStatus === "online" ? "blink 1.4s ease-in-out infinite" : "none" }} />
-          <span style={{ fontSize: 12, fontWeight: 700, color: shopperStatus === "online" ? C.green : C.muted }}>{shopperStatus === "online" ? "Online" : "Offline"}</span>
-        </div>
-      )}
-      <div onClick={() => { setIsShopperMode(m => !m); toast(!isShopperMode ? "Shopper mode 🛵" : "Customer mode 🛒", !isShopperMode ? "🛵" : "🛒"); }}
-        style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 13px", borderRadius: 20, background: isShopperMode ? C.accentBg : C.card, border: `1px solid ${isShopperMode ? C.accentLine : C.border}`, cursor: "pointer" }}>
-        <span style={{ fontSize: 14 }}>{isShopperMode ? "🛵" : "🛒"}</span>
-        <span style={{ fontSize: 12, fontWeight: 600, color: isShopperMode ? C.accent : C.sub }}>{isShopperMode ? "Shopper" : "Customer"}</span>
-      </div>
-    </div>
-  );
-}
 
 // ── ShopperDashboard ──────────────────────────────────────────
 function ShopperDashboard({ goTo, C }) {
@@ -6705,29 +6467,6 @@ function OfflineBanner() {
 }
 
 // ── Performance HUD (dev helper, bottom-left) ─────────────────
-function PerfHUD({ C }) {
-  const [fps, setFps] = useState(60);
-  const [show, setShow] = useState(false);
-  const frames = useRef([]);
-  useEffect(() => {
-    let raf;
-    const tick = (now) => {
-      frames.current = [...frames.current.filter(t => now - t < 1000), now];
-      setFps(frames.current.length);
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, []);
-  const color = fps >= 55 ? C.green : fps >= 30 ? C.gold : "#EF4444";
-  return (
-    <div onClick={() => setShow(s => !s)} style={{ position: "fixed", bottom: 95, left: 10, zIndex: 9700, background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, padding: show ? "8px 12px" : "4px 9px", fontSize: 12, fontFamily: "monospace", cursor: "pointer", minWidth: show ? 90 : 0 }}>
-      <div style={{ color, fontWeight: 700 }}>{fps}fps</div>
-      {show && <div style={{ color: C.muted, marginTop: 2, fontSize: 12 }}>tap to hide</div>}
-    </div>
-  );
-}
-
 // ── Rate-app prompt (shown after Nth order) ───────────────────
 function RateAppPrompt({ C, onDismiss }) {
   const toast = useToast();
@@ -14846,10 +14585,6 @@ function usePersonalization() {
 
 // ── PersonalizationContext ─────────────────────────────────────
 const PersonalizationContext = React.createContext(null);
-function PersonalizationProvider({ children }) {
-  const value = usePersonalization();
-  return <PersonalizationContext.Provider value={value}>{children}</PersonalizationContext.Provider>;
-}
 function useP13n() { return React.useContext(PersonalizationContext) || {}; }
 
 
@@ -15133,105 +14868,6 @@ function SkeletonScreen({ rows = 3, C }) {
 }
 
 // ── PersonalizationDashboard — AI model insights card ─────────
-function PersonalizationDashboard({ C, goTo }) {
-  const { scores, recentActions, topCategories, widgetOrder } = useP13n() || {};
-  const [expanded, setExpanded] = useState(false);
-  const [tab, setTab] = useState('insights'); // insights | actions | reset
-
-  const topItems = topCategories?.slice(0, 5) || [];
-  const categoryColors = {
-    stores: C.accent, wallet: C.green, meal: C.gold,
-    ordering: C.purple, rewards: C.gold, tracking: C.accent,
-    social: C.purple, groupbuy: C.green, game: '#FF9500',
-  };
-
-  return (
-    <div style={{ margin: '0 20px 18px', background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, overflow: 'hidden' }}>
-      {/* Header */}
-      <button
-        onClick={() => setExpanded(e => !e)}
-        aria-expanded={expanded}
-        aria-controls="p13n-panel"
-        style={{ width: '100%', background: 'transparent', border: 'none', padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', fontFamily: "Satoshi,system-ui,sans-serif" }}
-      >
-        <div style={{ width: 34, height: 34, borderRadius: 10, background: C.accentBg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 17, flexShrink: 0 }}>🧠</div>
-        <div style={{ flex: 1, textAlign: 'left' }}>
-          <div style={{ fontSize: 13.5, fontWeight: 700, color: C.text }}>Your AI Profile</div>
-          <div style={{ fontSize: 12, color: C.muted, marginTop: 1 }}>
-            {topItems.length ? `Top interest: ${topItems[0]?.category}` : 'Learning your preferences…'}
-          </div>
-        </div>
-        <span style={{ color: C.muted, fontSize: 14, transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform .25s var(--ease-out)' }}>▾</span>
-      </button>
-
-      {/* Content */}
-      <div id="p13n-panel" style={{ maxHeight: expanded ? 500 : 0, overflow: 'hidden', transition: 'max-height .35s var(--ease-out)' }}>
-        {/* Tabs */}
-        <div style={{ display: 'flex', padding: '0 14px', gap: 6, borderBottom: `1px solid ${C.border}`, marginBottom: 14 }}>
-          {[['insights','📊 Insights'],['actions','⚡ Top Actions'],['reset','🔄 Reset']].map(([id, label]) => (
-            <button key={id} onClick={() => setTab(id)} role="tab" aria-selected={tab===id}
-              style={{ padding: '8px 12px', background: 'transparent', border: 'none', cursor: 'pointer', fontFamily: "Satoshi,system-ui,sans-serif", fontSize: 12, fontWeight: tab===id ? 700 : 400, color: tab===id ? C.accent : C.sub, borderBottom: tab===id ? `2px solid ${C.accent}` : '2px solid transparent', transition: 'all .18s', marginBottom: -1 }}>
-              {label}
-            </button>
-          ))}
-        </div>
-
-        <div style={{ padding: '0 14px 14px' }}>
-          {tab === 'insights' && (
-            <div>
-              {/* Category bars */}
-              {topItems.length > 0 ? topItems.map((item, i) => (
-                <div key={item.category} style={{ marginBottom: 11 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
-                    <span style={{ fontSize: 12, fontWeight: 600, color: C.text, textTransform: 'capitalize' }}>{item.category}</span>
-                    <span style={{ fontSize: 12, color: C.sub }}>{item.count} interactions</span>
-                  </div>
-                  <div style={{ height: 6, borderRadius: 3, background: C.border, overflow: 'hidden' }}>
-                    <div style={{ height: '100%', borderRadius: 3, background: categoryColors[item.category] || C.accent, width: `${Math.min((item.count / (topItems[0]?.count || 1)) * 100, 100)}%`, transition: 'width .7s var(--ease-out)' }} />
-                  </div>
-                </div>
-              )) : (
-                <div style={{ textAlign: 'center', padding: '16px 0', color: C.muted, fontSize: 13 }}>
-                  Keep using Errand to train your AI profile ✨
-                </div>
-              )}
-              <div style={{ marginTop: 12, padding: '10px 12px', background: C.surface, borderRadius: 10, display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-                <span style={{ fontSize: 14 }}>💡</span>
-                <span style={{ fontSize: 12, color: C.sub, lineHeight: 1.5 }}>Quick Actions are reordered based on what you use most. Your data stays on-device only.</span>
-              </div>
-            </div>
-          )}
-
-          {tab === 'actions' && (
-            <div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
-                {(topItems.length ? topItems : [{category:'stores'},{category:'wallet'},{category:'rewards'}]).map((item, i) => (
-                  <MotionCard key={i} C={C} onClick={() => goTo(item.category === 'meal' ? 'meal-planner' : item.category)}
-                    ariaLabel={`Go to ${item.category}`}
-                    style={{ padding: '7px 13px', background: C.surface, border: `1px solid ${C.border}`, borderRadius: 'var(--r-pill)', display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <div style={{ width: 8, height: 8, borderRadius: '50%', background: categoryColors[item.category] || C.accent }} />
-                    <span style={{ fontSize: 12, fontWeight: 600, color: C.text, textTransform: 'capitalize' }}>{item.category}</span>
-                  </MotionCard>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {tab === 'reset' && (
-            <div style={{ textAlign: 'center', padding: '8px 0' }}>
-              <div style={{ fontSize: 13, color: C.sub, marginBottom: 14, lineHeight: 1.6 }}>
-                This will clear your interaction history and reset Quick Actions to default order.
-              </div>
-              <RippleButton variant="ghost" C={C} onClick={() => { safeStorage.removeItem('errand-pdata'); window.location.reload(); }} ariaLabel="Reset AI profile">
-                Reset AI Profile
-              </RippleButton>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // ── AccessibilityHub — full a11y control panel ─────────────────
 function AccessibilityHub({ C, onClose }) {
@@ -15437,7 +15073,7 @@ function SmartHomeGrid({ goTo, C }) {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
         <span className="disp" style={{ fontSize: 14, color: C.text }}>Quick Access</span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 12, fontWeight: 700, color: C.accent, background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 8, padding: '2px 7px' }}>✦ AI sorted</span>
+          
           {/* Layout toggle */}
           <div style={{ display: 'flex', gap: 1 }}>
             {[['grid','⊞'],['list','☰']].map(([l,icon]) => (
@@ -15545,47 +15181,128 @@ function injectMicroAnimationCSS(C) {
 // ── SmartQuickActions — reordered by usage frequency ──────────
 const PersonalisedQuickActions = (props) => <SmartQuickActions {...props} />;
 function SmartQuickActions({ goTo, C }) {
-  const { widgetOrder, track } = useP13n() || {};
+  const { track } = useP13n() || {};
 
-  const BASE_ACTIONS = [
-    { id: 'stores',      label: 'Stores',    icon: '🏪', action: 'nav', category: 'stores'    },
-    { id: 'meal-planner',label: 'Meal Plan', icon: '🥘', action: 'nav', category: 'meal'      },
-    { id: 'ordering',    label: 'Schedule',  icon: '📅', action: 'nav', category: 'ordering'  },
-    { id: 'groupbuy',    label: 'Group Buy', icon: '👥', action: 'nav', category: 'groupbuy'  },
-    { id: 'support',     label: 'Support',   icon: '💬', action: 'nav', category: 'support'   },
-    { id: 'wallet',      label: 'Wallet',    icon: '💰', action: 'nav', category: 'wallet'    },
-    { id: 'gamification',label: 'Play',      icon: '🎮', action: 'nav', category: 'game'      },
-    { id: 'social',      label: 'Community', icon: '🌍', action: 'nav', category: 'social'    },
-    { id: 'tracking',    label: 'Track',     icon: '📍', action: 'nav', category: 'tracking'  },
-    { id: 'rewards',     label: 'Rewards',   icon: '🏆', action: 'nav', category: 'rewards'   },
-    { id: 'referral',    label: 'Refer',     icon: '🎁', action: 'nav', category: 'referral'  },
-    { id: 'shoppers',    label: 'Shoppers',  icon: '🧑‍💼', action: 'nav', category: 'shoppers'  },
+  const CATEGORIES = [
+    {
+      label: "Shop",
+      actions: [
+        { id: "stores",       label: "Stores",     icon: "store",   color: C.accent    },
+        { id: "shoppers",     label: "Shoppers",   icon: "bike",    color: "#00E087"   },
+        { id: "create-list",  label: "My List",    icon: "list",    color: "#9B6FFF"   },
+        { id: "ordering",     label: "Schedule",   icon: "clock",   color: C.accent    },
+        { id: "groupbuy",     label: "Group Buy",  icon: "user",    color: "#F5C842"   },
+        { id: "meal-planner", label: "Meals",      icon: "food",    color: "#00E087"   },
+      ],
+    },
+    {
+      label: "Manage",
+      actions: [
+        { id: "wallet",       label: "Wallet",     icon: "wallet",  color: "#F5C842"   },
+        { id: "rewards",      label: "Rewards",    icon: "trophy",  color: "#F5C842"   },
+        { id: "tracking",     label: "Track",      icon: "pin",     color: C.accent    },
+        { id: "referral",     label: "Refer",      icon: "gift",    color: "#9B6FFF"   },
+        { id: "pass",         label: "Pass",       icon: "star",    color: "#F5C842"   },
+        { id: "support",      label: "Support",    icon: "help",    color: C.sub       },
+      ],
+    },
   ];
 
-  const ordered = widgetOrder ? widgetOrder(BASE_ACTIONS) : BASE_ACTIONS;
+  const ActionPill = ({ item, i }) => (
+    <div
+      onClick={() => { if(track) track("nav", { category: item.id }); goTo(item.id); }}
+      role="button" tabIndex={0}
+      onKeyDown={e => (e.key === "Enter" || e.key === " ") && goTo(item.id)}
+      aria-label={`Go to ${item.label}`}
+      className="tap"
+      style={{
+        flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center",
+        gap: 7, cursor: "pointer", padding: "13px 8px", borderRadius: 18,
+        background: C.card, border: `1px solid ${C.border}`,
+        width: 72, WebkitTapHighlightColor: "transparent",
+        animation: `staggerIn 320ms ${i * 50}ms both`,
+      }}
+    >
+      <div style={{ width: 40, height: 40, borderRadius: 13, background: item.color + "18", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <Icon name={item.icon} size={20} color={item.color} strokeWidth={1.8} />
+      </div>
+      <span style={{ fontSize: 11.5, fontWeight: 600, color: C.sub, textAlign: "center", lineHeight: 1.2 }}>{item.label}</span>
+    </div>
+  );
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, padding: '0 20px' }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 7 }}><span className="disp" style={{ fontSize: 15, color: C.text }}>Quick Access</span><span className="ai-badge">✦ AI</span></div>
-        <span style={{ fontSize: 12, background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 8, padding: '2px 7px', fontWeight: 700, color: C.accent }}>✦ AI sorted</span>
+    <div style={{ marginBottom: 8 }}>
+      {CATEGORIES.map(cat => (
+        <div key={cat.label} style={{ marginBottom: 18 }}>
+          {/* Category header */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 20px", marginBottom: 12 }}>
+            <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: 1.2, textTransform: "uppercase", color: C.muted }}>{cat.label}</span>
+          </div>
+          {/* Scrollable row */}
+          <div className="hrow" style={{ paddingInline: 20, gap: 8, paddingBottom: 4 }}>
+            {cat.actions.map((item, i) => (
+              <ActionPill key={item.id} item={item} i={i} />
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── OnlineShoppers — live strip shown on Home ─────────────────
+function OnlineShoppersStrip({ goTo, C }) {
+  const online = SHOPPERS.filter(s => s.online);
+  if (!online.length) return null;
+
+  return (
+    <div style={{ marginBottom: 22 }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 20px", marginBottom: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#00E087", animation: "blink 1.4s ease-in-out infinite" }} />
+          <span className="disp" style={{ fontSize: 17, color: C.text }}>Online Shoppers</span>
+        </div>
+        <span onClick={() => goTo("shoppers")} style={{ fontSize: 13, color: C.accent, fontWeight: 600, cursor: "pointer" }}>See all →</span>
       </div>
-      <div className="hrow" style={{ paddingInline: 20, gap: 8, paddingBottom: 4 }}>
-        {ordered.slice(0, 8).map((item, i) => (
-          <CardEntrance key={item.id} delay={i * 45}>
-            <div
-              onClick={() => { track('nav', { category: item.category }); goTo(item.id); }}
-              role="button" tabIndex={0}
-              onKeyDown={e => (e.key === 'Enter' || e.key === ' ') && goTo(item.id)}
-              aria-label={`Go to ${item.label}`}
-              style={{ flexShrink: 0, width: 68, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, cursor: 'pointer', padding: '10px 8px', borderRadius: 14, background: C.card, border: `1px solid ${C.border}`, transition: 'transform .18s var(--ease-spring), border-color .15s', WebkitTapHighlightColor: 'transparent' }}
-              className="tap hover-lift"
-            >
-              <span style={{ fontSize: 22 }}>{item.icon}</span>
-              <span style={{ fontSize: 12, fontWeight: 600, color: C.sub, textAlign: 'center', lineHeight: 1.2 }}>{item.label}</span>
+
+      {/* Horizontal scroll */}
+      <div className="hrow" style={{ paddingInline: 20, gap: 12, paddingBottom: 4 }}>
+        {online.map((s, i) => (
+          <div key={s.id} onClick={() => goTo("shoppers")}
+            className="tap"
+            style={{
+              flexShrink: 0, width: 120, background: C.card, border: `1px solid ${C.border}`,
+              borderRadius: 18, padding: "14px 12px", textAlign: "center", cursor: "pointer",
+              animation: `staggerIn 320ms ${i * 60}ms both`,
+            }}>
+            {/* Avatar with online ring */}
+            <div style={{ position: "relative", width: 48, height: 48, margin: "0 auto 10px" }}>
+              <div style={{ width: 48, height: 48, borderRadius: "50%", background: `linear-gradient(135deg,${C.accent},#FF9500)`, border: `2.5px solid ${C.bg}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26, boxShadow: `0 0 0 2px #00E087` }}>
+                {s.emoji}
+              </div>
+              <div style={{ position: "absolute", bottom: 0, right: 0, width: 12, height: 12, borderRadius: "50%", background: "#00E087", border: `2px solid ${C.bg}` }} />
             </div>
-          </CardEntrance>
+            <div style={{ fontWeight: 700, fontSize: 12.5, color: C.text, marginBottom: 3, lineHeight: 1.2 }}>{s.name.split(" ")[0]}</div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, marginBottom: 6 }}>
+              <span style={{ color: "#F5C842", fontSize: 11 }}>★</span>
+              <span style={{ fontSize: 11, color: C.sub, fontWeight: 600 }}>{s.rating}</span>
+            </div>
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>{s.specialty}</div>
+            <div style={{ background: `linear-gradient(135deg,${C.accent},#FF9500)`, borderRadius: 9, padding: "5px 8px", fontSize: 11, fontWeight: 700, color: "#fff" }}>
+              ₦{s.rate}/hr
+            </div>
+          </div>
         ))}
+
+        {/* CTA card */}
+        <div onClick={() => goTo("shoppers")} className="tap"
+          style={{ flexShrink: 0, width: 100, background: C.accentBg, border: `1.5px dashed ${C.accentLine}`, borderRadius: 18, padding: "14px 12px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, cursor: "pointer" }}>
+          <div style={{ width: 40, height: 40, borderRadius: "50%", background: C.accent, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Icon name="plus" size={20} color="#fff" strokeWidth={2.5} />
+          </div>
+          <span style={{ fontSize: 11.5, fontWeight: 700, color: C.accent, textAlign: "center", lineHeight: 1.3 }}>Find a Shopper</span>
+        </div>
       </div>
     </div>
   );
@@ -15753,7 +15470,6 @@ function useKeyboardList(count, onSelect) {
   return { focusedIndex: focused, onKeyDown, setFocused };
 }
 
-// ── VoiceCommand — Web Speech API integration ─────────────────
 function useVoiceCommands(commands) {
   // commands = [{ phrases: ['go home', 'home screen'], action: () => goTo('home') }]
   const [listening, setListening] = useState(false);
@@ -15797,7 +15513,6 @@ function useVoiceCommands(commands) {
   return { listening, transcript, supported, start, stop };
 }
 
-// ── VoiceButton — floating mic button ─────────────────────────
 function VoiceButton({ goTo, C }) {
   const [expanded, setExpanded] = useState(false);
   const announce = useAnnounce();
@@ -16245,95 +15960,6 @@ function EnhancedAccordion({ title, children, C, defaultOpen = false, icon }) {
 }
 
 // VoiceCommandPanel — enhanced with visual feedback + transcript
-function VoiceCommandPanel({ onCommand, C, commands = [] }) {
-  const [listening, setListening] = useState(false);
-  const [transcript, setTranscript] = useState('');
-  const [matched, setMatched]   = useState(null);
-  const [error, setError]       = useState(null);
-  const recogRef = useRef(null);
-
-  const DEFAULT_COMMANDS = [
-    { phrase: ['go home', 'home'], action: 'home',        label: 'Go Home',      icon: '🏠' },
-    { phrase: ['show cart', 'my cart', 'open cart'], action: 'cart', label: 'Open Cart', icon: '🛒' },
-    { phrase: ['track order', 'tracking', 'where is my order'], action: 'tracking', label: 'Track Order', icon: '📍' },
-    { phrase: ['open wallet', 'my wallet', 'wallet'], action: 'wallet', label: 'Open Wallet', icon: '💰' },
-    { phrase: ['show stores', 'browse stores', 'stores'], action: 'stores', label: 'Browse Stores', icon: '🏪' },
-    { phrase: ['my orders', 'order history', 'orders'], action: 'orders', label: 'My Orders', icon: '📦' },
-    ...commands,
-  ];
-
-  const start = () => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { setError('Voice not supported in this browser'); return; }
-    setError(null); setTranscript(''); setMatched(null);
-
-    const r = new SR();
-    r.lang = 'en-NG';
-    r.continuous = false;
-    r.interimResults = true;
-    recogRef.current = r;
-
-    r.onstart  = () => setListening(true);
-    r.onend    = () => setListening(false);
-    r.onerror  = (e) => { setError(`Error: ${e.error}`); setListening(false); };
-    r.onresult = (e) => {
-      const text = Array.from(e.results).map(r => r[0].transcript.toLowerCase()).join(' ');
-      setTranscript(text);
-      const hit = DEFAULT_COMMANDS.find(c => c.phrase.some(p => text.includes(p)));
-      if (hit && e.results[0]?.isFinal) {
-        setMatched(hit);
-        setListening(false);
-        if ('vibrate' in navigator) navigator.vibrate([50, 30, 80]);
-        setTimeout(() => onCommand?.(hit.action), 400);
-      }
-    };
-    r.start();
-  };
-
-  const stop = () => { recogRef.current?.stop?.(); setListening(false); };
-
-  return (
-    <div role="region" aria-label="Voice commands" style={{ padding: '0 20px', marginBottom: 16 }}>
-      {/* Mic button */}
-      <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12 }}>
-        <button
-          onClick={listening ? stop : start}
-          aria-pressed={listening}
-          aria-label={listening ? 'Stop listening' : 'Start voice command'}
-          style={{
-            width: 52, height: 52, borderRadius: '50%', cursor: 'pointer',
-            background: listening ? C.accent : C.card,
-            border: `2px solid ${listening ? C.accent : C.border}`,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22,
-            boxShadow: listening ? `0 0 0 6px ${C.accentBg}, 0 0 0 10px ${C.accentBg}` : 'none',
-            transition: 'all .22s var(--ease-spring)',
-            animation: listening ? 'pulseRing 1.5s ease-out infinite' : 'none',
-          }}
-        >
-          {listening ? '🔴' : '🎙️'}
-        </button>
-        <div>
-          <div style={{ fontSize: 14, fontWeight: 600, color: C.text }}>
-            {listening ? 'Listening…' : matched ? `Matched: ${matched.label}` : 'Voice Commands'}
-          </div>
-          {transcript && <div style={{ fontSize: 12, color: C.sub, marginTop: 2 }}>"{transcript}"</div>}
-          {error && <div style={{ fontSize: 12, color: C.red || '#EF4444', marginTop: 2 }}>{error}</div>}
-        </div>
-      </div>
-
-      {/* Command hints */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-        {DEFAULT_COMMANDS.slice(0, 6).map(c => (
-          <button key={c.action} onClick={() => onCommand?.(c.action)}
-            aria-label={`Voice command: ${c.label}`}
-            style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 11px', background: matched?.action === c.action ? C.accentBg : C.surface, border: `1px solid ${matched?.action === c.action ? C.accentLine : C.border}`, borderRadius: 20, fontSize: 12, fontWeight: 500, color: matched?.action === c.action ? C.accent : C.sub, cursor: 'pointer', fontFamily: "Satoshi,system-ui,sans-serif", transition: 'all .15s' }}>
-            <span aria-hidden="true">{c.icon}</span>{c.label}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 // ── Bottom nav items ─────────────────────────────────────────
 // SVG icon components for nav (no emoji, crisp at any size)
@@ -16573,7 +16199,6 @@ function AppInner() {
 
   return (
     <A11yProvider>
-    <PersonalizationProvider>
     <ErrorBoundary C={C}>
     <ShopperModeProvider>
     <AuthProvider C={C}>
@@ -16626,18 +16251,14 @@ function AppInner() {
             <Screen />
           </div>
           {!isDesktop && showNav && <Nav view={view} goTo={goTo} cartCount={cartCount} C={C} />}
-          {showNav && <VoiceMicButton C={C} goTo={goTo} addToCart={addToCart} />}
-          {showNav && <AIAssistant goTo={goTo} addToCart={addToCart} C={C} />}
         </div>
         </>
       )}
-      <VoiceButton goTo={goTo} C={C} />
       <KeyboardNav goTo={goTo} openA11y={() => setShowA11y(true)} />
       <Toasts C={C} />
       <InAppNotificationToast C={C} />
       <SWStatusBadge C={C} />
       <OfflineBanner />
-      <PerfHUD C={C} />
 
       {/* City indicator pill — tap to switch city */}
       {phase === 'app' && !['city-switcher'].includes(view) && (
@@ -16666,7 +16287,6 @@ function AppInner() {
     </AuthProvider>
     </ShopperModeProvider>
     </ErrorBoundary>
-    </PersonalizationProvider>
     </A11yProvider>
   );
 }
@@ -17129,60 +16749,6 @@ function withHighContrast(C, hcActive) {
 
 // Voice command integration (Web Speech API)
 
-function VoiceMicButton({ C, goTo, addToCart }) {
-  const toast = useToast();
-  const commands = {
-    'home':      () => goTo('home'),
-    'stores':    () => goTo('stores'),
-    'cart':      () => goTo('cart'),
-    'wallet':    () => goTo('wallet'),
-    'track':     () => goTo('tracking'),
-    'orders':    () => goTo('orders'),
-    'rewards':   () => goTo('rewards'),
-    'settings':  () => goTo('settings'),
-    'search':    () => goTo('search'),
-    'support':   () => goTo('support'),
-    'navigate to': (t) => {
-      const dest = t.replace('navigate to', '').trim();
-      goTo(dest.replace(/ /g, '-'));
-    },
-  };
-
-  const { start, stop, listening, transcript, error, supported } = useVoiceCommands(commands);
-  const { announce, LiveRegion } = useLiveAnnounce();
-
-  useEffect(() => {
-    if (transcript) { toast(`Heard: "${transcript}"`, '🎙️'); announce(`Voice command: ${transcript}`); }
-  }, [transcript]);
-  useEffect(() => { if (error) toast(`Voice error: ${error}`, '⚠️', 'error'); }, [error]);
-
-  if (!supported) return null;
-
-  return (
-    <>
-      <LiveRegion />
-      <button
-        onClick={listening ? stop : start}
-        aria-label={listening ? 'Stop voice command' : 'Start voice command — say a screen name to navigate'}
-        aria-pressed={listening}
-        style={{
-          position: 'fixed', bottom: 90, right: 18, zIndex: 300,
-          width: 46, height: 46, borderRadius: '50%',
-          background: listening ? C.accent : C.card,
-          border: `2px solid ${listening ? C.accent : C.border}`,
-          boxShadow: listening ? `0 0 0 6px ${C.accentGlow}, 0 4px 20px ${C.accentGlow}` : '0 4px 16px rgba(0,0,0,.2)',
-          cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: 20, transition: 'all .25s var(--ease-spring)',
-          animation: listening ? 'pulseRing 1.5s ease-out infinite' : 'none',
-        }}
-      >
-        {listening ? '⏹' : '🎙️'}
-      </button>
-    </>
-  );
-}
-
-// Accessible toggle switch (replaces inline div toggles)
 function A11yToggle({ value, onChange, label, C }) {
   return (
     <button
