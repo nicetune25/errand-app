@@ -28,6 +28,7 @@ const Icon = ({ name, size = 20, color = "currentColor", strokeWidth = 1.8, styl
     chart:      <svg viewBox="0 0 24 24" {...p} style={s}><path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 4-4"/></svg>,
     phone:      <svg viewBox="0 0 24 24" {...p} style={s}><rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="18" r="1" fill={color}/></svg>,
     mail:       <svg viewBox="0 0 24 24" {...p} style={s}><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 7l10 7 10-7"/></svg>,
+    chat:       <svg viewBox="0 0 24 24" {...p} style={s}><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>,
     lock:       <svg viewBox="0 0 24 24" {...p} style={s}><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>,
     copy:       <svg viewBox="0 0 24 24" {...p} style={s}><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>,
     share:      <svg viewBox="0 0 24 24" {...p} style={s}><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>,
@@ -963,213 +964,314 @@ function usePaystack() {
 }
 
 // ── Auth screen ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+//  AUTH SCREEN — Email + Password (Supabase real-time auth)
+//  Flow: Welcome → Sign Up / Sign In → Success
+// ═══════════════════════════════════════════════════════════════
 function AuthScreen({ onDone, onDemo, C }) {
   const { signIn, signUp } = useAuth() || {};
   const toast = useToast();
-  const [mode, setMode] = useState("in"); // in | up | reset
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [resetSent, setResetSent] = useState(false);
-  const [showPw, setShowPw] = useState(false);
-  const [userType, setUserType] = useState("customer");
-  const [socialPressed, setSocialPressed] = useState(null);
 
-  const submit = async () => {
-    setError(""); setLoading(true);
+  const [step, setStep]       = useState("welcome"); // welcome | signup | login | success
+  const [userType, setUserType] = useState("customer");
+  const [form, setForm]       = useState({ name: "", email: "", password: "", dob: "" });
+  const [showPw, setShowPw]   = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError]     = useState("");
+
+  const setF = (k, v) => { setForm(f => ({ ...f, [k]: v })); setError(""); };
+
+  const inputStyle = {
+    width: "100%", height: 54, background: C.dark ? "rgba(255,255,255,.05)" : "rgba(0,0,0,.04)",
+    border: `1.5px solid ${C.border}`, borderRadius: 14, padding: "0 16px",
+    color: C.text, fontSize: 16, outline: "none",
+    fontFamily: "Satoshi,system-ui,sans-serif", boxSizing: "border-box",
+    transition: "border-color .15s",
+  };
+  const focusStyle = { borderColor: C.accent, boxShadow: `0 0 0 3px ${C.accentBg}` };
+
+  const handleSignUp = async () => {
+    if (!form.name.trim())       { setError("Please enter your full name"); return; }
+    if (!form.email.trim())      { setError("Please enter your email address"); return; }
+    if (!/\S+@\S+\.\S+/.test(form.email)) { setError("Please enter a valid email"); return; }
+    if (form.password.length < 6){ setError("Password must be at least 6 characters"); return; }
+    setLoading(true);
     try {
-      if (mode === "in") { await signIn(email, password); onDone(); }
-      else if (mode === "up") {
-        if (!name.trim()) { setError("Please enter your name"); setLoading(false); return; }
-        if (password.length < 6) { setError("Password must be at least 6 characters"); setLoading(false); return; }
-        await signUp(email, password, name, phone, userType); onDone();
-      } else { await sbAuth.resetPassword(email); setResetSent(true); }
-    } catch (e) { setError(e.message || "Something went wrong. Please try again."); }
+      await signUp(form.email, form.password, form.name, "", userType);
+      setStep("success");
+    } catch (e) {
+      setError(e.message || "Sign up failed. Please try again.");
+    }
     setLoading(false);
   };
 
-  const socialBtn = (id, icon, label) => (
-    <button key={id}
-      onPointerDown={() => setSocialPressed(id)}
-      onPointerUp={() => setSocialPressed(null)}
-      onPointerLeave={() => setSocialPressed(null)}
-      onClick={() => { toast(`${label} sign-in coming soon`, "info"); }}
-      style={{
-        width: "100%", height: 56, display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
-        background: C.dark ? "rgba(255,255,255,.06)" : "rgba(0,0,0,.04)",
-        border: `1.5px solid ${C.border}`, borderRadius: 16,
-        color: C.text, fontSize: 15, fontWeight: 600, cursor: "pointer",
-        fontFamily: "Satoshi,system-ui,sans-serif",
-        transform: socialPressed === id ? "scale(.97)" : "scale(1)",
-        transition: "transform 200ms cubic-bezier(.34,1.56,.64,1)",
-      }}>
-      {icon} {label}
-    </button>
-  );
+  const handleSignIn = async () => {
+    if (!form.email.trim())  { setError("Please enter your email"); return; }
+    if (!form.password)      { setError("Please enter your password"); return; }
+    setLoading(true);
+    try {
+      await signIn(form.email, form.password);
+      onDone();
+    } catch (e) {
+      setError(e.message?.includes("Invalid") ? "Incorrect email or password" : e.message || "Sign in failed.");
+    }
+    setLoading(false);
+  };
 
-  return (
+  // ── Shell wrapper ─────────────────────────────────────────
+  const Shell = ({ children, showBack, onBack, centered }) => (
     <div style={{
-      minHeight: "100vh", background: C.bg,
+      minHeight: "100vh", background: C.bg, display: "flex", flexDirection: "column",
       backgroundImage: C.dark
-        ? `radial-gradient(ellipse 90% 50% at 15% 0%, rgba(255,77,26,.06) 0%, transparent 55%), radial-gradient(ellipse 70% 40% at 85% 100%, rgba(155,111,255,.05) 0%, transparent 55%)`
-        : `radial-gradient(ellipse 80% 50% at 20% 0%, rgba(255,77,26,.05) 0%, transparent 55%), radial-gradient(ellipse 60% 40% at 80% 100%, rgba(255,149,0,.04) 0%, transparent 55%)`,
-      display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-      padding: "40px 24px 48px",
+        ? `radial-gradient(ellipse 70% 50% at 10% 0%, ${C.accent}09 0%, transparent 55%), radial-gradient(ellipse 50% 40% at 90% 100%, ${C.purple}07 0%, transparent 55%)`
+        : `radial-gradient(ellipse 70% 50% at 10% 0%, ${C.accent}06 0%, transparent 55%)`,
     }}>
-      {/* Logo */}
-      <div style={{ textAlign: "center", marginBottom: 32 }}>
-        <div style={{ width: 72, height: 72, background: `linear-gradient(135deg,${C.accent},#FF9500)`, borderRadius: 22, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px", boxShadow: `0 8px 32px ${C.accentGlow}` }}>
-          <Icon name="store" size={34} color="#fff" />
+      {showBack && (
+        <div style={{ padding: "52px 24px 0" }}>
+          <Back onClick={onBack} C={C} />
         </div>
-        {/* Centered headline 28pt — Grok spec */}
-        <div className="disp" style={{ fontSize: 28, color: C.text, letterSpacing: "-0.04em", marginBottom: 6 }}>
-          {mode === "in" ? "Welcome back" : mode === "up" ? "Create account" : "Reset password"}
-        </div>
-        <div style={{ color: C.sub, fontSize: 15 }}>
-          {mode === "in" ? "Sign in to continue" : mode === "up" ? "Join Errand today" : "We'll send you a reset link"}
-        </div>
-      </div>
-
-      <div style={{ width: "100%", maxWidth: 400 }}>
-        {/* Reset password flow */}
-        {mode === "reset" && (
-          <div style={{ animation: "up .2s ease" }}>
-            {resetSent ? (
-              <div style={{ textAlign: "center", padding: "20px 0 28px" }}>
-                <div style={{ width: 64, height: 64, borderRadius: 20, background: C.greenBg, border: `1px solid ${C.green}33`, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
-                  <Icon name="mail" size={30} color={C.green} />
-                </div>
-                <div className="disp" style={{ fontSize: 22, color: C.text, marginBottom: 8 }}>Check your email</div>
-                <div style={{ color: C.sub, fontSize: 15, lineHeight: 1.6 }}>We sent a reset link to <b style={{ color: C.text }}>{email}</b></div>
-                <button onClick={() => { setMode("in"); setResetSent(false); }} style={{ marginTop: 22, color: C.accent, background: "none", border: "none", fontSize: 15, fontWeight: 600, cursor: "pointer", fontFamily: "Satoshi,system-ui,sans-serif" }}>← Back to sign in</button>
-              </div>
-            ) : (
-              <>
-                <div style={{ color: C.sub, fontSize: 15, marginBottom: 20, lineHeight: 1.6 }}>Enter your email and we'll send you a link to reset your password.</div>
-                <div style={{ marginBottom: 14 }}>
-                  <input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email address" type="email"
-                    style={{ width: "100%", height: 56, background: C.dark ? "rgba(255,255,255,.04)" : "rgba(0,0,0,.03)", border: `1.5px solid ${C.border}`, borderRadius: 16, padding: "0 16px", color: C.text, fontSize: 16, outline: "none", fontFamily: "Satoshi,system-ui,sans-serif", boxSizing: "border-box" }} />
-                </div>
-                <button onClick={submit} style={{ width: "100%", height: 56, background: `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 16, color: "#fff", fontWeight: 700, fontSize: 16, cursor: "pointer", fontFamily: "Satoshi,system-ui,sans-serif", boxShadow: `0 8px 24px ${C.accentGlow}`, marginBottom: 14 }}>
-                  {loading ? <span style={{ width: 18, height: 18, border: "2.5px solid rgba(255,255,255,.2)", borderTopColor: "rgba(255,255,255,.9)", borderRightColor: "rgba(255,255,255,.5)", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} /> : "Send reset link"}
-                </button>
-                <button onClick={() => setMode("in")} style={{ width: "100%", textAlign: "center", color: C.sub, background: "none", border: "none", fontSize: 14, cursor: "pointer", fontFamily: "Satoshi,system-ui,sans-serif" }}>← Back to sign in</button>
-              </>
-            )}
-          </div>
-        )}
-
-        {mode !== "reset" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12, animation: "up .2s ease" }}>
-            {/* Mode tabs */}
-            <div style={{ display: "flex", background: C.card, borderRadius: 14, padding: 3, marginBottom: 4, border: `1px solid ${C.border}` }}>
-              {[["in","Sign in"],["up","Sign up"]].map(([id, l]) => (
-                <button key={id} onClick={() => { setMode(id); setError(""); }}
-                  style={{ flex: 1, height: 42, border: "none", borderRadius: 12, cursor: "pointer", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 600, fontSize: 15, transition: "all .2s", background: mode === id ? C.accent : "transparent", color: mode === id ? "#fff" : C.sub }}>{l}</button>
-              ))}
-            </div>
-
-            {/* Social buttons FIRST — Grok spec */}
-            {socialBtn("google", "🔵", "Continue with Google")}
-            {socialBtn("apple", "⚫", "Continue with Apple")}
-
-            {/* OR divider */}
-            <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "4px 0" }}>
-              <div style={{ flex: 1, height: 1, background: `linear-gradient(90deg, transparent, ${C.border}, transparent)` }} />
-              <span style={{ color: C.muted, fontSize: 13, fontWeight: 600 }}>or</span>
-              <div style={{ flex: 1, height: 1, background: `linear-gradient(90deg, ${C.border}, transparent)` }} />
-            </div>
-
-            {/* Sign-up extra fields */}
-            {mode === "up" && (
-              <>
-                {/* Account type */}
-                <div>
-                  <div style={{ fontSize: 12, fontWeight: 800, color: C.sub, letterSpacing: 1.2, marginBottom: 10, textTransform: "uppercase" }}>I want to join as</div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {[
-                      { id: "customer", icon: "user",  label: "Customer",         desc: "Order groceries, run errands, shop from stores" },
-                      { id: "shopper",  icon: "bike",  label: "Personal Shopper", desc: "Earn money shopping and delivering for others" },
-                      { id: "store",    icon: "store", label: "Store Owner",      desc: "List your products and sell to customers" },
-                    ].map(type => {
-                      const sel = userType === type.id;
-                      return (
-                        <div key={type.id} onClick={() => setUserType(type.id)}
-                          style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 14px", background: sel ? C.accentBg : C.card, border: `2px solid ${sel ? C.accent : C.border}`, borderRadius: 16, cursor: "pointer", transition: "all .15s" }}>
-                          <div style={{ width: 42, height: 42, borderRadius: 13, background: sel ? C.accent : C.surface, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "background .15s" }}>
-                            <Icon name={type.icon} size={20} color={sel ? "#fff" : C.sub} />
-                          </div>
-                          <div style={{ flex: 1 }}>
-                            <div style={{ fontWeight: 700, fontSize: 14, color: sel ? C.accent : C.text }}>{type.label}</div>
-                            <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{type.desc}</div>
-                          </div>
-                          <div style={{ width: 22, height: 22, borderRadius: "50%", border: `2px solid ${sel ? C.accent : C.border}`, background: sel ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "all .15s" }}>
-                            {sel && <Icon name="check" size={11} color="#fff" strokeWidth={3} />}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-                <input value={name} onChange={e => setName(e.target.value)} placeholder="Full name"
-                  style={{ width: "100%", height: 56, background: C.dark ? "rgba(255,255,255,.04)" : "rgba(0,0,0,.03)", border: `1.5px solid ${C.border}`, borderRadius: 16, padding: "0 16px", color: C.text, fontSize: 16, outline: "none", fontFamily: "Satoshi,system-ui,sans-serif", boxSizing: "border-box" }} />
-                <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="Phone number" type="tel"
-                  style={{ width: "100%", height: 56, background: C.dark ? "rgba(255,255,255,.04)" : "rgba(0,0,0,.03)", border: `1.5px solid ${C.border}`, borderRadius: 16, padding: "0 16px", color: C.text, fontSize: 16, outline: "none", fontFamily: "Satoshi,system-ui,sans-serif", boxSizing: "border-box" }} />
-              </>
-            )}
-
-            {/* Email — 56pt height, radius 16pt — Grok spec */}
-            <input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email address" type="email"
-              style={{ width: "100%", height: 56, background: C.dark ? "rgba(255,255,255,.04)" : "rgba(0,0,0,.03)", border: `1.5px solid ${C.border}`, borderRadius: 16, padding: "0 16px", color: C.text, fontSize: 16, outline: "none", fontFamily: "Satoshi,system-ui,sans-serif", boxSizing: "border-box" }} />
-
-            {/* Password + eye icon */}
-            <div style={{ position: "relative" }}>
-              <input value={password} onChange={e => setPassword(e.target.value)} placeholder="Password" type={showPw ? "text" : "password"}
-                style={{ width: "100%", height: 56, background: C.dark ? "rgba(255,255,255,.04)" : "rgba(0,0,0,.03)", border: `1.5px solid ${C.border}`, borderRadius: 16, padding: "0 48px 0 16px", color: C.text, fontSize: 16, outline: "none", fontFamily: "Satoshi,system-ui,sans-serif", boxSizing: "border-box" }} />
-              <button onClick={() => setShowPw(v => !v)} style={{ position: "absolute", right: 14, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: C.muted, cursor: "pointer", display: "flex", alignItems: "center" }}>
-                <Icon name={showPw ? "eyeOff" : "eye"} size={19} color={C.muted} />
-              </button>
-            </div>
-
-            {mode === "in" && (
-              <div style={{ textAlign: "right", marginTop: -4 }}>
-                <span onClick={() => { setMode("reset"); setError(""); }} style={{ color: C.accent, fontSize: 14, cursor: "pointer", fontWeight: 600 }}>Forgot password?</span>
-              </div>
-            )}
-
-            {/* Error — inline red 14pt — Grok spec */}
-            {error && (
-              <div style={{ background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.2)", borderRadius: 12, padding: "11px 14px", color: "#EF4444", fontSize: 14, display: "flex", gap: 8, alignItems: "center" }}>
-                <Icon name="alert" size={16} color="#EF4444" />{error}
-              </div>
-            )}
-
-            {/* Primary CTA — full width 56pt — Grok spec */}
-            <button onClick={submit} disabled={loading}
-              style={{ width: "100%", height: 56, background: loading ? C.border : `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 16, color: loading ? C.muted : "#fff", fontWeight: 700, fontSize: 17, cursor: loading ? "default" : "pointer", fontFamily: "Satoshi,system-ui,sans-serif", boxShadow: loading ? "none" : `0 10px 32px ${C.accentGlow}`, transition: "all .2s", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-              {loading
-                ? <span style={{ width: 18, height: 18, border: "2.5px solid rgba(255,255,255,.2)", borderTopColor: "rgba(255,255,255,.9)", borderRightColor: "rgba(255,255,255,.5)", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />
-                : mode === "in" ? "Sign in" : "Create account"}
-            </button>
-
-            {/* Demo shortcut */}
-            <button onClick={onDemo || onDone} style={{ textAlign: "center", color: C.muted, background: "none", border: "none", fontSize: 13, cursor: "pointer", fontFamily: "Satoshi,system-ui,sans-serif", marginTop: 2 }}>
-              Continue as guest →
-            </button>
-
-            {mode === "up" && (
-              <div style={{ textAlign: "center", color: C.muted, fontSize: 12, lineHeight: 1.5 }}>
-                By continuing you agree to our <span style={{ color: C.accent, cursor: "pointer" }}>Terms</span> & <span style={{ color: C.accent, cursor: "pointer" }}>Privacy Policy</span>
-              </div>
-            )}
-          </div>
-        )}
+      )}
+      <div style={{ flex: 1, padding: "0 24px 40px", display: "flex", flexDirection: centered ? "column" : "column", justifyContent: centered ? "center" : "flex-start" }}>
+        {children}
       </div>
     </div>
   );
+
+  // ══════════════════════════════════════════════════════════
+  // WELCOME
+  // ══════════════════════════════════════════════════════════
+  if (step === "welcome") return (
+    <Shell centered>
+      {/* Hero */}
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginBottom: 48 }}>
+        <div style={{ position: "relative", width: 200, height: 200, marginBottom: 36 }}>
+          <div style={{ width: 200, height: 200, borderRadius: "50%", background: C.dark ? `${C.accent}10` : `${C.accent}08`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ width: 140, height: 140, borderRadius: "50%", background: C.dark ? `${C.accent}14` : `${C.accent}10`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <div style={{ width: 88, height: 88, borderRadius: 26, background: `linear-gradient(135deg,${C.accent},#FF9500)`, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 16px 48px ${C.accentGlow}` }}>
+                <Icon name="store" size={40} color="#fff" strokeWidth={1.6} />
+              </div>
+            </div>
+          </div>
+          {/* Floating badges */}
+          {[
+            { icon: "bike",  label: "Shoppers", pos: { top: "5%",  left: "-8%"  }, color: "#00E087" },
+            { icon: "store", label: "Stores",   pos: { top: "10%", right: "-8%" }, color: C.accent  },
+            { icon: "zap",   label: "Fast",     pos: { bottom: "8%", left: "2%" }, color: "#9B6FFF" },
+          ].map((b, i) => (
+            <div key={i} style={{ position: "absolute", ...b.pos, background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "6px 10px", display: "flex", alignItems: "center", gap: 6, boxShadow: "0 4px 16px rgba(0,0,0,.12)", animation: `float ${2.6 + i * 0.4}s ease-in-out infinite`, animationDelay: `${i * 0.3}s` }}>
+              <div style={{ width: 22, height: 22, borderRadius: 6, background: b.color + "22", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <Icon name={b.icon} size={12} color={b.color} />
+              </div>
+              <span style={{ fontSize: 11, fontWeight: 700, color: C.text }}>{b.label}</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="disp" style={{ fontSize: 32, color: C.text, textAlign: "center", letterSpacing: "-0.04em", lineHeight: 1.15, marginBottom: 12 }}>
+          Let's get started
+        </div>
+        <div style={{ color: C.sub, fontSize: 15, textAlign: "center", lineHeight: 1.7, maxWidth: 290 }}>
+          Shop, order errands and connect with personal shoppers across Lagos.
+        </div>
+      </div>
+
+      {/* CTAs */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <button onClick={() => { setStep("signup"); setError(""); setForm({ name: "", email: "", password: "", dob: "" }); }}
+          style={{ width: "100%", height: 56, background: `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 16, color: "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 17, cursor: "pointer", boxShadow: `0 8px 28px ${C.accentGlow}`, letterSpacing: "0.01em" }}>
+          Create Account
+        </button>
+        <button onClick={() => { setStep("login"); setError(""); setForm({ name: "", email: "", password: "", dob: "" }); }}
+          style={{ width: "100%", height: 56, background: "transparent", border: `1.5px solid ${C.border}`, borderRadius: 16, color: C.text, fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 600, fontSize: 17, cursor: "pointer" }}>
+          Login to Account
+        </button>
+        <button onClick={onDemo || onDone}
+          style={{ background: "none", border: "none", color: C.muted, fontSize: 13, cursor: "pointer", fontFamily: "Satoshi,sans-serif", padding: "8px", textAlign: "center" }}>
+          Continue as guest →
+        </button>
+      </div>
+    </Shell>
+  );
+
+  // ══════════════════════════════════════════════════════════
+  // SIGN UP
+  // ══════════════════════════════════════════════════════════
+  if (step === "signup") return (
+    <Shell showBack onBack={() => setStep("welcome")}>
+      <div style={{ paddingTop: 32 }}>
+        <div className="disp" style={{ fontSize: 30, color: C.text, letterSpacing: "-0.04em", marginBottom: 6 }}>Create Account</div>
+        <div style={{ color: C.sub, fontSize: 15, marginBottom: 32, lineHeight: 1.6 }}>Join thousands of Lagos shoppers on Errand.</div>
+
+        {/* Account type */}
+        <div style={{ fontSize: 12, fontWeight: 800, color: C.sub, letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 10 }}>I am a</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 28 }}>
+          {[["customer","user","Customer"],["shopper","bike","Shopper"],["store","store","Store Owner"]].map(([id, icon, label]) => {
+            const sel = userType === id;
+            return (
+              <div key={id} onClick={() => setUserType(id)} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 7, padding: "14px 8px", borderRadius: 16, border: `2px solid ${sel ? C.accent : C.border}`, background: sel ? C.accentBg : C.card, cursor: "pointer", transition: "all .15s" }}>
+                <div style={{ width: 38, height: 38, borderRadius: 11, background: sel ? C.accent : C.surface, display: "flex", alignItems: "center", justifyContent: "center", transition: "background .15s" }}>
+                  <Icon name={icon} size={19} color={sel ? "#fff" : C.muted} />
+                </div>
+                <span style={{ fontSize: 12, fontWeight: sel ? 700 : 500, color: sel ? C.accent : C.sub }}>{label}</span>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Fields */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 7 }}>Full Name</div>
+            <input value={form.name} onChange={e => setF("name", e.target.value)}
+              placeholder="John Doe" style={inputStyle}
+              onFocus={e => Object.assign(e.target.style, focusStyle)}
+              onBlur={e => { e.target.style.borderColor = C.border; e.target.style.boxShadow = "none"; }} />
+          </div>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 7 }}>Email Address</div>
+            <input value={form.email} onChange={e => setF("email", e.target.value)}
+              type="email" placeholder="your@email.com" style={inputStyle}
+              onFocus={e => Object.assign(e.target.style, focusStyle)}
+              onBlur={e => { e.target.style.borderColor = C.border; e.target.style.boxShadow = "none"; }} />
+          </div>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 7 }}>Password</div>
+            <div style={{ position: "relative" }}>
+              <input value={form.password} onChange={e => setF("password", e.target.value)}
+                type={showPw ? "text" : "password"} placeholder="Minimum 6 characters"
+                style={{ ...inputStyle, paddingRight: 48 }}
+                onFocus={e => Object.assign(e.target.style, focusStyle)}
+                onBlur={e => { e.target.style.borderColor = C.border; e.target.style.boxShadow = "none"; }} />
+              <button onClick={() => setShowPw(v => !v)} style={{ position: "absolute", right: 14, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", padding: 4 }}>
+                <Icon name={showPw ? "eyeOff" : "eye"} size={18} color={C.muted} />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {error && (
+          <div style={{ marginTop: 14, background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.2)", borderRadius: 12, padding: "10px 14px", color: "#EF4444", fontSize: 14, display: "flex", gap: 8, alignItems: "center" }}>
+            <Icon name="alert" size={15} color="#EF4444" />{error}
+          </div>
+        )}
+
+        <div style={{ marginTop: 12, color: C.muted, fontSize: 12, lineHeight: 1.6 }}>
+          By creating an account you agree to our{" "}
+          <span style={{ color: C.accent, cursor: "pointer" }}>Terms of Service</span> and{" "}
+          <span style={{ color: C.accent, cursor: "pointer" }}>Privacy Policy</span>.
+        </div>
+      </div>
+
+      <div style={{ flex: 1, minHeight: 32 }} />
+
+      <button onClick={handleSignUp} disabled={loading}
+        style={{ width: "100%", height: 56, background: loading ? C.border : `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 16, color: loading ? C.muted : "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 17, cursor: loading ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, boxShadow: loading ? "none" : `0 8px 28px ${C.accentGlow}`, transition: "all .2s", marginBottom: 16 }}>
+        {loading ? <><span style={{ width: 18, height: 18, border: "2.5px solid rgba(255,255,255,.25)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />Creating account…</> : "Create Account"}
+      </button>
+
+      <div style={{ textAlign: "center", color: C.sub, fontSize: 14 }}>
+        Already have an account?{" "}
+        <span onClick={() => { setStep("login"); setError(""); }} style={{ color: C.accent, fontWeight: 700, cursor: "pointer" }}>Sign in</span>
+      </div>
+    </Shell>
+  );
+
+  // ══════════════════════════════════════════════════════════
+  // SIGN IN
+  // ══════════════════════════════════════════════════════════
+  if (step === "login") return (
+    <Shell showBack onBack={() => setStep("welcome")}>
+      <div style={{ paddingTop: 32 }}>
+        <div className="disp" style={{ fontSize: 30, color: C.text, letterSpacing: "-0.04em", marginBottom: 6 }}>Welcome back</div>
+        <div style={{ color: C.sub, fontSize: 15, marginBottom: 36, lineHeight: 1.6 }}>Sign in to your Errand account.</div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 7 }}>Email Address</div>
+            <input value={form.email} onChange={e => setF("email", e.target.value)}
+              type="email" placeholder="your@email.com" style={inputStyle}
+              onFocus={e => Object.assign(e.target.style, focusStyle)}
+              onBlur={e => { e.target.style.borderColor = C.border; e.target.style.boxShadow = "none"; }} />
+          </div>
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: C.sub }}>Password</div>
+              <span onClick={() => {
+                if (!form.email) { setError("Enter your email first"); return; }
+                sbAuth.resetPassword(form.email).then(() => toast("Reset link sent to " + form.email, "success")).catch(e => setError(e.message));
+              }} style={{ fontSize: 12, color: C.accent, fontWeight: 600, cursor: "pointer" }}>Forgot password?</span>
+            </div>
+            <div style={{ position: "relative" }}>
+              <input value={form.password} onChange={e => setF("password", e.target.value)}
+                type={showPw ? "text" : "password"} placeholder="Your password"
+                onKeyDown={e => e.key === "Enter" && handleSignIn()}
+                style={{ ...inputStyle, paddingRight: 48 }}
+                onFocus={e => Object.assign(e.target.style, focusStyle)}
+                onBlur={e => { e.target.style.borderColor = C.border; e.target.style.boxShadow = "none"; }} />
+              <button onClick={() => setShowPw(v => !v)} style={{ position: "absolute", right: 14, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", padding: 4 }}>
+                <Icon name={showPw ? "eyeOff" : "eye"} size={18} color={C.muted} />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {error && (
+          <div style={{ marginTop: 14, background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.2)", borderRadius: 12, padding: "10px 14px", color: "#EF4444", fontSize: 14, display: "flex", gap: 8, alignItems: "center" }}>
+            <Icon name="alert" size={15} color="#EF4444" />{error}
+          </div>
+        )}
+      </div>
+
+      <div style={{ flex: 1, minHeight: 32 }} />
+
+      <button onClick={handleSignIn} disabled={loading}
+        style={{ width: "100%", height: 56, background: loading ? C.border : `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 16, color: loading ? C.muted : "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 17, cursor: loading ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, boxShadow: loading ? "none" : `0 8px 28px ${C.accentGlow}`, transition: "all .2s", marginBottom: 16 }}>
+        {loading ? <><span style={{ width: 18, height: 18, border: "2.5px solid rgba(255,255,255,.25)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />Signing in…</> : "Sign In"}
+      </button>
+
+      <div style={{ textAlign: "center", color: C.sub, fontSize: 14 }}>
+        Don't have an account?{" "}
+        <span onClick={() => { setStep("signup"); setError(""); }} style={{ color: C.accent, fontWeight: 700, cursor: "pointer" }}>Create one</span>
+      </div>
+    </Shell>
+  );
+
+  // ══════════════════════════════════════════════════════════
+  // SUCCESS
+  // ══════════════════════════════════════════════════════════
+  if (step === "success") return (
+    <Shell centered>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center" }}>
+        <div style={{ width: 100, height: 100, borderRadius: 30, background: `linear-gradient(135deg,${C.accent},#FF9500)`, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 28, boxShadow: `0 16px 48px ${C.accentGlow}`, animation: "bounceIn .5s var(--ease-spring)" }}>
+          <Icon name="check" size={48} color="#fff" strokeWidth={2.2} />
+        </div>
+        <div className="disp" style={{ fontSize: 32, color: C.text, letterSpacing: "-0.04em", marginBottom: 12 }}>
+          Account Created!
+        </div>
+        <div style={{ color: C.sub, fontSize: 15, lineHeight: 1.7, maxWidth: 280, marginBottom: 12 }}>
+          Welcome to Errand, <span style={{ color: C.text, fontWeight: 700 }}>{form.name.split(" ")[0]}</span>. You can now start shopping.
+        </div>
+        {userType !== "customer" && (
+          <div style={{ background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 14, padding: "12px 16px", marginBottom: 8, fontSize: 13, color: C.text, lineHeight: 1.6 }}>
+            Complete your <strong>{userType === "shopper" ? "shopper" : "store"}</strong> profile to start {userType === "shopper" ? "earning" : "selling"}.
+          </div>
+        )}
+      </div>
+
+      <div style={{ marginTop: 40 }}>
+        <button onClick={() => {
+          if (userType === "shopper") onDone("shopper-onboarding");
+          else if (userType === "store") onDone("store-onboarding");
+          else onDone();
+        }}
+          style={{ width: "100%", height: 56, background: `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 16, color: "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 17, cursor: "pointer", boxShadow: `0 8px 28px ${C.accentGlow}`, marginBottom: 12 }}>
+          {userType === "shopper" ? "Complete Shopper Profile →" : userType === "store" ? "Set Up Your Store →" : "Start Shopping →"}
+        </button>
+      </div>
+    </Shell>
+  );
+
+  return null;
 }
 
 
@@ -1309,7 +1411,7 @@ function useRealTimeLocation() {
   };
 
   const requestLocation = React.useCallback(() => {
-    if (!("geolocation" in navigator)) {
+    if (typeof navigator === "undefined" || !("geolocation" in navigator)) {
       setLocation(prev => ({ ...prev, error: "GPS not supported", loading: false }));
       return;
     }
@@ -1329,7 +1431,7 @@ function useRealTimeLocation() {
 
   // Watch position for live updates
   React.useEffect(() => {
-    if (!("geolocation" in navigator)) return;
+    if (typeof navigator === "undefined" || !("geolocation" in navigator)) return;
     const watchId = navigator.geolocation.watchPosition(
       ({ coords }) => {
         const { latitude: lat, longitude: lng } = coords;
@@ -3326,7 +3428,7 @@ function Profile({ goTo, C, dark, toggleDark }) {
     { section: "Shopping", items: [{ icon: "📦", label: "My Orders", go: "orders" }, { icon: "🧾", label: "Order Receipt", go: "order-receipt" }, { icon: "❤️", label: "Saved Stores" }, { icon: "🔔", label: "Notifications", go: "push-settings" }] },
     { section: "Finance",  items: [{ icon: "💰", label: "Wallet", go: "wallet" }, { icon: "🏆", label: "Rewards", go: "rewards" }, { icon: "💳", label: "Payment Methods", go: "payments" }] },
     { section: "Discover", items: [{ icon: "👑", label: "Errand Pass", go: "pass" }, { icon: "👥", label: "Group Buy", go: "groupbuy" }, { icon: "🎁", label: "Refer & Earn", go: "referral" }, { icon: "🏙️", label: "Community Feed", go: "social" }, { icon: "📅", label: "Advanced Ordering", go: "ordering" }] },
-    { section: "Shopper",  items: [{ icon: "🛵", label: "Shopper Hub", go: "shopper-hub" }, { icon: "📝", label: "Become a Shopper", go: "shopper-onboarding" }, { icon: "⭐", label: "My Ratings", go: "shopper-ratings" }] },
+    { section: "Shopper",  items: [{ icon: "🛵", label: "Shopper Hub", go: "shopper-hub" }, { icon: "🛵", label: "Shopper Registration", go: "shopper-onboarding" }, { icon: "🏪", label: "Open a Store", go: "store-onboarding" }, { icon: "⭐", label: "My Ratings", go: "shopper-ratings" }] },
     { section: "Play & Earn", items: [{ icon: "🎮", label: "Challenges & Spin", go: "gamification" }] },
     { section: "My Store", items: [{ icon: "🏪", label: "Store Dashboard", go: "store-dashboard" }, { icon: "📦", label: "Product Manager", go: "products" }, { icon: "⚠️", label: "Order Disputes", go: "disputes" }, { icon: "🔧", label: "Business Tools", go: "business" }] },
     { section: "Account",  items: [{ icon: "✏️", label: "Edit Profile", go: "edit-profile" }, { icon: "⚙️", label: "Settings", go: "settings" }, { icon: "❓", label: "Help & Support", go: "help" }, { icon: "🛡️", label: "Verification Queue", go: "verify-queue" }, { icon: "📊", label: "Analytics", go: "analytics" }, { icon: "💰", label: "Commissions", go: "commissions" }, { icon: "🏷️", label: "Promo Manager", go: "promo-manager" }, { icon: "🚀", label: "Launch Prep", go: "launch-prep" }, { icon: "▲", label: "Deploy Guide", go: "deploy-guide" }, { icon: "🔐", label: "Admin Panel", go: "admin-panel" }, { icon: "📲", label: "Install App", go: "pwa-install" }, { icon: "⭐", label: "Store Reviews", go: "store-reviews" }] },
@@ -3408,167 +3510,10 @@ function Profile({ goTo, C, dark, toggleDark }) {
 
 // ── ONBOARDING ───────────────────────────────────────────────
 function Onboarding({ onDone, C }) {
-  const [step, setStep] = useState(0);
-  const [location, setLocation] = useState("");
-  const [prefs, setPrefs] = useState([]);
-  const [detecting, setDetecting] = useState(false);
-  const [pressed, setPressed] = useState(false);
-
-  const SLIDES = [
-    {
-      icon: "store",   iconColor: C.accent,
-      title: "Welcome to Errand",
-      sub: "Your personal market, delivered anywhere in Lagos within the hour.",
-      cta: "Get Started",
-    },
-    {
-      icon: "bike",    iconColor: "#00E087",
-      title: "Personal Shoppers",
-      sub: "Real humans shop for you. Chat live, negotiate prices, track every step.",
-      cta: "Sounds great",
-    },
-    {
-      icon: "zap",     iconColor: "#F5C842",
-      title: "Flash Deals Daily",
-      sub: "Up to 60% off on groceries, beauty, electronics & more — every day.",
-      cta: "Show me deals",
-    },
-    {
-      icon: "pin",     iconColor: C.accent,
-      title: "Set Your Location",
-      sub: "We'll find the closest stores and shoppers near you.",
-      cta: null, isLocation: true,
-    },
-    {
-      icon: "star",    iconColor: "#9B6FFF",
-      title: "What Do You Shop For?",
-      sub: "Pick your categories so we can personalise your feed.",
-      cta: null, isPrefs: true,
-    },
-  ];
-
-  const CATS = ["Groceries","Beauty","Electronics","Organic","Home & Living","Sports","Fashion","Pharmacy"];
-  const AREAS = ["Victoria Island","Lekki","Ikoyi","Lagos Island","Ikeja","Yaba","Surulere","Ajah","Gbagada","Oniru"];
-
-  const slide = SLIDES[step];
-  const isLast = step === SLIDES.length - 1;
-
-  const detect = () => {
-    setDetecting(true);
-    setTimeout(() => { setLocation("Victoria Island, Lagos"); setDetecting(false); }, 1600);
-  };
-  const togglePref = (p) => setPrefs(ps => ps.includes(p) ? ps.filter(x => x !== p) : [...ps, p]);
-  const next = () => { if (isLast) onDone(); else setStep(s => s + 1); };
-
-  return (
-    <div style={{ position: "fixed", inset: 0, background: C.bg, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-      {/* Skip — top right, small, muted */}
-      <div style={{ position: "absolute", top: 52, right: 22, zIndex: 10 }}>
-        <button onClick={onDone} style={{ background: "none", border: "none", color: C.muted, fontSize: 13, cursor: "pointer", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 500, padding: "8px 0" }}>Skip</button>
-      </div>
-
-      {/* Hero illustration — 60-70% viewport height */}
-      <div key={`hero-${step}`} style={{
-        height: "62vh", flexShrink: 0,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        background: `radial-gradient(ellipse 80% 80% at 50% 60%, ${slide.iconColor}14 0%, transparent 70%)`,
-        animation: "up .32s cubic-bezier(.34,1.56,.64,1)",
-        position: "relative",
-      }}>
-        {/* Large decorative circles */}
-        <div style={{ position: "absolute", width: 220, height: 220, borderRadius: "50%", border: `1.5px solid ${slide.iconColor}18`, top: "50%", left: "50%", transform: "translate(-50%,-50%)" }} />
-        <div style={{ position: "absolute", width: 160, height: 160, borderRadius: "50%", border: `1.5px solid ${slide.iconColor}28`, top: "50%", left: "50%", transform: "translate(-50%,-50%)" }} />
-        {/* Central icon */}
-        <div style={{
-          width: 120, height: 120, borderRadius: 36,
-          background: `linear-gradient(145deg, ${slide.iconColor}22, ${slide.iconColor}0a)`,
-          border: `1.5px solid ${slide.iconColor}30`,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          boxShadow: `0 20px 60px ${slide.iconColor}28`,
-        }}>
-          <Icon name={slide.icon} size={52} color={slide.iconColor} strokeWidth={1.5} />
-        </div>
-      </div>
-
-      {/* Text + CTA — bottom 38vh */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", padding: "0 28px 0" }}>
-        {/* Slide content */}
-        <div key={`txt-${step}`} style={{ animation: "up .3s ease" }}>
-          <div className="disp" style={{ fontSize: 30, color: C.text, lineHeight: 1.15, letterSpacing: "-0.04em", marginBottom: 12 }}>{slide.title}</div>
-          <div style={{ color: C.sub, fontSize: 17, lineHeight: 1.65, marginBottom: 24 }}>{slide.sub}</div>
-        </div>
-
-        {/* Location step */}
-        {slide.isLocation && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
-            <div style={{ position: "relative" }}>
-              <input value={location} onChange={e => setLocation(e.target.value)} placeholder="Enter your area (e.g. Lekki Phase 1)"
-                style={{ width: "100%", background: C.card, border: `1.5px solid ${location ? C.accent : C.border}`, borderRadius: 16, padding: "15px 44px 15px 44px", color: C.text, fontSize: 16, outline: "none", fontFamily: "Satoshi,system-ui,sans-serif", boxSizing: "border-box" }} />
-              <div style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)" }}><Icon name="pin" size={18} color={location ? C.accent : C.muted} /></div>
-              {location && <button onClick={() => setLocation("")} style={{ position: "absolute", right: 14, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 20 }}>×</button>}
-            </div>
-            <button onClick={detect} disabled={detecting}
-              style={{ width: "100%", padding: "13px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, color: detecting ? C.muted : C.accent, fontWeight: 600, fontSize: 15, cursor: detecting ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, fontFamily: "Satoshi,system-ui,sans-serif" }}>
-              {detecting
-                ? <><span style={{ width: 14, height: 14, border: `2px solid ${C.border}`, borderTopColor: C.accent, borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} /> Detecting…</>
-                : <><Icon name="pin" size={15} color={C.accent} /> Use my current location</>}
-            </button>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              {AREAS.slice(0, 6).map(a => (
-                <button key={a} onClick={() => setLocation(a + ", Lagos")} style={{ padding: "8px 14px", background: location === a+", Lagos" ? C.accentBg : C.card, border: `1px solid ${location === a+", Lagos" ? C.accent : C.border}`, borderRadius: 100, cursor: "pointer", fontSize: 13, color: location === a+", Lagos" ? C.accent : C.sub, fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 500 }}>{a}</button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Preferences step */}
-        {slide.isPrefs && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 9, marginBottom: 16 }}>
-            {CATS.map(c => {
-              const sel = prefs.includes(c);
-              return (
-                <button key={c} onClick={() => togglePref(c)}
-                  style={{ padding: "10px 18px", borderRadius: 100, border: `1.5px solid ${sel ? C.accent : C.border}`, background: sel ? C.accentBg : C.card, color: sel ? C.accent : C.sub, fontWeight: sel ? 700 : 400, fontSize: 14, cursor: "pointer", transition: "all 200ms cubic-bezier(.34,1.56,.64,1)", fontFamily: "Satoshi,system-ui,sans-serif" }}>{c}</button>
-              );
-            })}
-          </div>
-        )}
-
-        <div style={{ flex: 1 }} />
-
-        {/* Pagination dots */}
-        <div style={{ display: "flex", justifyContent: "center", gap: 6, marginBottom: 20 }}>
-          {SLIDES.map((_, i) => (
-            <div key={i} onClick={() => setStep(i)} style={{ height: 4, borderRadius: 2, background: i === step ? C.accent : C.border, width: i === step ? 24 : 7, transition: "all 280ms cubic-bezier(.34,1.56,.64,1)", cursor: "pointer" }} />
-          ))}
-        </div>
-
-        {/* Primary CTA — full width 56pt */}
-        <div style={{ paddingBottom: 48, display: "flex", flexDirection: "column", gap: 10 }}>
-          {(slide.cta || slide.isLocation || slide.isPrefs) && (
-            <button onClick={next}
-              onPointerDown={() => setPressed(true)}
-              onPointerUp={() => setPressed(false)}
-              onPointerLeave={() => setPressed(false)}
-              className="btn-ripple"
-              style={{
-                width: "100%", height: 56, background: `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none",
-                borderRadius: 18, color: "#fff", fontWeight: 700, fontSize: 17, cursor: "pointer",
-                fontFamily: "Satoshi,system-ui,sans-serif",
-                transform: pressed ? "scale(.97) translateY(1px)" : "scale(1)",
-                transition: "transform 280ms cubic-bezier(.34,1.56,.64,1)",
-                boxShadow: `0 10px 32px ${C.accentGlow}`, letterSpacing: "0.02em",
-              }}>
-              {isLast ? "Start shopping →" : (slide.cta || "Continue →")}
-            </button>
-          )}
-          {step > 0 && (
-            <button onClick={() => setStep(s => s - 1)} style={{ background: "none", border: "none", color: C.muted, fontSize: 14, cursor: "pointer", fontFamily: "Satoshi,system-ui,sans-serif", padding: "4px" }}>← Back</button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
+  // Onboarding is now handled inside AuthScreen (5-step flow)
+  // This is kept for backward compatibility — just call onDone
+  React.useEffect(() => { onDone(); }, []);
+  return null;
 }
 
 
@@ -9382,223 +9327,392 @@ function CitySwitcher({ goTo, C }) {
 //  Application · Requirements · Earnings · Activation
 // ══════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════
+//  SHOPPER ONBOARDING — full KYC + profile registration
+// ═══════════════════════════════════════════════════════════════
 function ShopperOnboarding({ goTo, C }) {
-  const toast = useToast();
-  const [step, setStep] = useState(0); // 0=welcome, 1=requirements, 2=apply, 3=earnings, 4=done
-  const [form, setForm] = useState({ name: "", phone: "", vehicle: "bike", area: "", bank: "", acctNo: "", bvn: "" });
-  const [submitting, setSubmitting] = useState(false);
+  const toast  = useToast();
   const { user } = useAuth() || {};
+  const [step, setStep]       = useState(0);
+  const [submitting, setSubmitting] = useState(false);
+  const [done, setDone]       = useState(false);
 
-  const STEPS = ["Welcome", "Requirements", "Application", "Earnings", "Done"];
+  // Form state
+  const [form, setForm] = useState({
+    // Personal
+    fullName: "", dob: "", gender: "", phone: "", email: "",
+    // Address
+    state: "", lga: "", area: "", address: "",
+    // Identity
+    idType: "", idNumber: "", bvn: "",
+    // Shopper details
+    vehicle: "bike", workingHours: [], bankName: "", acctNumber: "", acctName: "",
+    // Files (base64 previews)
+    profilePhoto: null, idFront: null, idBack: null, selfie: null,
+  });
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const fileToBase64 = (file) => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+
+  const pickImage = async (key) => {
+    const input = document.createElement("input");
+    input.type = "file"; input.accept = "image/*";
+    input.onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      if (file.size > 5 * 1024 * 1024) { toast("Image must be under 5MB", "error"); return; }
+      const b64 = await fileToBase64(file);
+      set(key, b64);
+    };
+    input.click();
+  };
+
+  const STEPS = [
+    { label: "Personal Info",   icon: "user"    },
+    { label: "Address",         icon: "pin"     },
+    { label: "Identity (KYC)",  icon: "shield"  },
+    { label: "Shopper Details", icon: "bike"    },
+    { label: "Bank Details",    icon: "wallet"  },
+    { label: "Review & Submit", icon: "check"   },
+  ];
 
   const VEHICLES = [
-    { id: "bike", label: "Motorcycle", emoji: "🏍️", tip: "Most popular. ₦1,200–2,800/order" },
-    { id: "bicycle", label: "Bicycle", emoji: "🚲", tip: "Short distances. ₦600–1,400/order" },
-    { id: "car", label: "Car / Keke", emoji: "🚗", tip: "Bulky orders. ₦2,000–5,000/order" },
-    { id: "foot", label: "Walking", emoji: "🚶", tip: "Nearby only. ₦400–900/order" },
+    { id: "bike",    label: "Motorcycle",  icon: "bike",  pay: "₦1,200–2,800/order" },
+    { id: "bicycle", label: "Bicycle",     icon: "bike",  pay: "₦600–1,400/order"   },
+    { id: "car",     label: "Car / Keke",  icon: "truck", pay: "₦2,000–5,000/order" },
+    { id: "foot",    label: "Walking",     icon: "user",  pay: "₦400–900/order"     },
   ];
 
-  const REQUIREMENTS = [
-    { icon: "📱", title: "Smartphone", desc: "Android 8+ or iPhone iOS 14+, with data" },
-    { icon: "🪪", title: "Valid ID", desc: "NIN, Driver's licence, or Voter's card" },
-    { icon: "🏦", title: "Bank account", desc: "Nigerian bank account for weekly payouts" },
-    { icon: "👤", title: "Age 18+", desc: "Must be at least 18 years old" },
-    { icon: "📍", title: "Location access", desc: "Allow location for order matching" },
-  ];
-
-  const EARNINGS = [
-    { title: "Base pay per order", value: "₦800–₦3,500", icon: "💰", desc: "Based on distance + order size" },
-    { title: "Tips", value: "100% yours", icon: "🎁", desc: "Customers tip on top of delivery fee" },
-    { title: "Peak bonuses", value: "+₦200–500", icon: "⚡", desc: "Fri/Sat evenings and lunch hours" },
-    { title: "Referral bonus", value: "₦2,000", icon: "👥", desc: "Per active shopper you refer" },
-    { title: "Weekly payout", value: "Every Monday", icon: "🏦", desc: "Direct to your bank account" },
+  const HOURS = ["6am–10am","10am–2pm","2pm–6pm","6pm–10pm","Weekends only","Full time"];
+  const BANKS = ["Access Bank","First Bank","GTBank","Zenith Bank","UBA","Fidelity Bank","Sterling Bank","Opay","Palmpay","Kuda Bank","Moniepoint"];
+  const STATES = ["Lagos","Abuja","Rivers","Kano","Ogun","Oyo","Enugu","Delta","Kaduna","Anambra"];
+  const ID_TYPES = [
+    { id: "nin",      label: "NIN Slip / Card",         sub: "National Identification Number" },
+    { id: "voters",   label: "Voter's Card (PVC)",       sub: "Permanent Voter's Card"         },
+    { id: "drivers",  label: "Driver's Licence",         sub: "Valid Nigerian driver's licence" },
+    { id: "passport", label: "International Passport",   sub: "Valid Nigerian passport"         },
+    { id: "intl_id",  label: "National ID Card",         sub: "Issued by NIMC"                  },
   ];
 
   const submit = async () => {
-    if (!form.name.trim() || !form.phone.trim() || !form.acctNo.trim()) {
-      toast("Please fill all required fields", "⚠️", "error"); return;
-    }
     setSubmitting(true);
     try {
       await sbDB.insert("shopper_applications", {
         user_id: user?.id || "guest",
-        ...form,
-        status: "pending",
+        full_name:   form.fullName,
+        dob:         form.dob,
+        gender:      form.gender,
+        phone:       form.phone,
+        email:       form.email,
+        state:       form.state,
+        lga:         form.lga,
+        area:        form.area,
+        address:     form.address,
+        id_type:     form.idType,
+        id_number:   form.idNumber,
+        bvn:         form.bvn,
+        vehicle:     form.vehicle,
+        working_hrs: form.workingHours.join(", "),
+        bank_name:   form.bankName,
+        acct_number: form.acctNumber,
+        acct_name:   form.acctName,
+        has_photo:   !!form.profilePhoto,
+        has_id:      !!form.idFront,
+        has_selfie:  !!form.selfie,
+        status:      "pending",
         submitted_at: new Date().toISOString(),
       });
-    } catch (e) { console.warn("Application save failed (non-blocking):", e.message); }
+    } catch(e) { console.warn("Save failed:", e.message); }
     setSubmitting(false);
-    setStep(4);
-    toast("Application submitted! 🎉", "✅", "success");
+    setDone(true);
   };
 
-  const progress = ((step) / (STEPS.length - 1)) * 100;
+  // ── Success screen ────────────────────────────────────────
+  if (done) return (
+    <div className="screen" style={{ background: C.bg, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "40px 24px", paddingBottom: 100 }}>
+      <div style={{ textAlign: "center", animation: "up .4s ease", width: "100%", maxWidth: 400 }}>
+        <div style={{ width: 88, height: 88, borderRadius: 26, background: C.greenBg, border: `1.5px solid ${C.green}44`, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", boxShadow: `0 8px 32px ${C.green}28` }}>
+          <Icon name="check" size={44} color={C.green} strokeWidth={2.5} />
+        </div>
+        <div className="disp" style={{ fontSize: 26, color: C.text, marginBottom: 8 }}>Application Submitted!</div>
+        <div style={{ color: C.sub, fontSize: 15, marginBottom: 28, lineHeight: 1.7 }}>Your shopper profile is under review. We'll notify you within 24–48 hours.</div>
+        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: "16px 18px", marginBottom: 28, textAlign: "left" }}>
+          {[
+            ["Identity", "Being verified with NIMC/FRSC"],
+            ["Bank account", "Verification in progress"],
+            ["Profile review", "Usually 24–48 hrs on weekdays"],
+            ["Activation", "You'll get SMS + in-app notification"],
+          ].map(([k,v]) => (
+            <div key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${C.border}` }}>
+              <span style={{ color: C.sub, fontSize: 13 }}>{k}</span>
+              <span style={{ color: C.text, fontSize: 13, fontWeight: 600, maxWidth: "55%", textAlign: "right" }}>{v}</span>
+            </div>
+          ))}
+        </div>
+        <Btn C={C} block onClick={() => goTo("home")}>Back to Home</Btn>
+      </div>
+    </div>
+  );
+
+  const progress = (step / (STEPS.length - 1)) * 100;
+
+  // ── Image picker component ────────────────────────────────
+  const ImgPicker = ({ field, label, hint }) => (
+    <div onClick={() => pickImage(field)} style={{ border: `2px dashed ${form[field] ? C.accent : C.border}`, borderRadius: 16, padding: "20px", textAlign: "center", cursor: "pointer", background: form[field] ? C.accentBg : C.surface, transition: "all .2s" }}>
+      {form[field]
+        ? <img src={form[field]} alt={label} style={{ width: 80, height: 80, borderRadius: 12, objectFit: "cover", margin: "0 auto 8px", display: "block" }} />
+        : <div style={{ width: 56, height: 56, borderRadius: 16, background: C.card, border: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 10px" }}><Icon name="camera" size={24} color={C.muted} /></div>
+      }
+      <div style={{ fontWeight: 600, fontSize: 14, color: form[field] ? C.accent : C.text, marginBottom: 4 }}>{form[field] ? "✓ Photo uploaded" : label}</div>
+      {hint && <div style={{ color: C.muted, fontSize: 12 }}>{hint}</div>}
+    </div>
+  );
+
+  // ── Field label ───────────────────────────────────────────
+  const Label = ({ text, required }) => (
+    <div style={{ fontSize: 12, fontWeight: 800, color: C.sub, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+      {text}{required && <span style={{ color: C.accent }}> *</span>}
+    </div>
+  );
+
+  // ── Input style ───────────────────────────────────────────
+  const inputStyle = { width: "100%", height: 52, background: C.dark ? "rgba(255,255,255,.04)" : "rgba(0,0,0,.03)", border: `1.5px solid ${C.border}`, borderRadius: 14, padding: "0 16px", color: C.text, fontSize: 15, outline: "none", fontFamily: "Satoshi,system-ui,sans-serif", boxSizing: "border-box" };
+  const selectStyle = { ...inputStyle, cursor: "pointer" };
 
   return (
     <div className="screen" style={{ background: C.bg, paddingBottom: 100 }}>
-      <div style={{ padding: "52px 20px 0" }}>
-        <Back onClick={() => step > 0 ? setStep(s => s - 1) : goTo("profile")} C={C} />
-
-        {/* Progress bar */}
-        <div style={{ margin: "16px 0 24px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-            <span style={{ color: C.sub, fontSize: 12 }}>Step {step + 1} of {STEPS.length}</span>
-            <span style={{ color: C.accent, fontSize: 12, fontWeight: 600 }}>{STEPS[step]}</span>
-          </div>
-          <div style={{ height: 4, background: C.border, borderRadius: 2, overflow: "hidden" }}>
-            <div style={{ height: "100%", width: `${progress}%`, background: C.accent, borderRadius: 2, transition: "width .4s ease" }} />
-          </div>
+      {/* Header */}
+      <div style={{ padding: "52px 20px 16px", display: "flex", gap: 12, alignItems: "center" }}>
+        <Back onClick={() => step > 0 ? setStep(s => s-1) : goTo("profile")} C={C} />
+        <div style={{ flex: 1 }}>
+          <div className="disp" style={{ fontSize: 22, color: C.text, letterSpacing: "-0.03em" }}>Become a Shopper</div>
+          <div style={{ color: C.sub, fontSize: 12, marginTop: 2 }}>Step {step+1} of {STEPS.length} · {STEPS[step].label}</div>
         </div>
+      </div>
 
-        {/* Step 0 — Welcome */}
-        {step === 0 && (
-          <div style={{ animation: "up .3s ease" }}>
-            <div style={{ textAlign: "center", padding: "20px 0 32px" }}>
-              <div style={{ fontSize: 72, marginBottom: 20 }}>🛵</div>
-              <div className="disp" style={{ fontSize: 26, color: C.text, marginBottom: 10 }}>Become a Shopper</div>
-              <div style={{ color: C.sub, fontSize: 14, lineHeight: 1.7, maxWidth: 320, margin: "0 auto 32px" }}>
-                Earn money on your schedule. Shop and deliver orders from top stores in your city.
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 32 }}>
-                {[["₦186k+", "Top monthly earn"], ["4.9★", "Avg shopper rating"], ["3,200+", "Active shoppers"]].map(([v, l]) => (
-                  <div key={l} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 13, padding: "12px 8px" }}>
-                    <div className="disp" style={{ fontSize: 16, color: C.accent }}>{v}</div>
-                    <div style={{ color: C.muted, fontSize: 12, marginTop: 3, lineHeight: 1.3 }}>{l}</div>
-                  </div>
-                ))}
-              </div>
+      {/* Progress bar */}
+      <div style={{ height: 4, background: C.border, margin: "0 20px 24px", borderRadius: 2, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${progress}%`, background: `linear-gradient(90deg,${C.accent},#FF9500)`, borderRadius: 2, transition: "width .4s ease" }} />
+      </div>
+
+      {/* Step indicators */}
+      <div className="hrow" style={{ paddingInline: 20, gap: 8, marginBottom: 24 }}>
+        {STEPS.map((s, i) => (
+          <div key={i} style={{ flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 5, opacity: i > step ? .4 : 1, transition: "opacity .3s" }}>
+            <div style={{ width: 34, height: 34, borderRadius: "50%", background: i < step ? C.green : i === step ? C.accent : C.card, border: `2px solid ${i < step ? C.green : i === step ? C.accent : C.border}`, display: "flex", alignItems: "center", justifyContent: "center", transition: "all .3s" }}>
+              {i < step ? <Icon name="check" size={15} color="#fff" strokeWidth={2.5} /> : <Icon name={s.icon} size={15} color={i === step ? "#fff" : C.muted} />}
             </div>
-            <button onClick={() => setStep(1)} style={{ width: "100%", padding: "16px", background: C.accent, border: "none", borderRadius: 14, color: "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 16, cursor: "pointer", boxShadow: `0 4px 20px ${C.accent}44` }}>
-              Start application →
-            </button>
+            <span style={{ fontSize: 10, color: i === step ? C.accent : C.muted, fontWeight: i === step ? 700 : 400, whiteSpace: "nowrap" }}>{s.label.split(" ")[0]}</span>
           </div>
-        )}
+        ))}
+      </div>
 
-        {/* Step 1 — Requirements */}
-        {step === 1 && (
-          <div style={{ animation: "up .3s ease" }}>
-            <div className="disp" style={{ fontSize: 22, color: C.text, marginBottom: 6 }}>What you'll need</div>
-            <div style={{ color: C.sub, fontSize: 13, marginBottom: 20 }}>Make sure you have these ready before applying.</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 28 }}>
-              {REQUIREMENTS.map((r, i) => (
-                <div key={i} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 13, padding: "13px 15px", display: "flex", gap: 12, alignItems: "center" }}>
-                  <div style={{ width: 42, height: 42, borderRadius: 12, background: C.accentBg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 }}>{r.icon}</div>
-                  <div>
-                    <div style={{ fontWeight: 600, fontSize: 14, color: C.text }}>{r.title}</div>
-                    <div style={{ color: C.sub, fontSize: 12, marginTop: 2 }}>{r.desc}</div>
-                  </div>
-                  <span style={{ marginLeft: "auto", color: C.green, fontSize: 18 }}>✓</span>
-                </div>
-              ))}
+      {/* Steps */}
+      <div style={{ padding: "0 20px", display: "flex", flexDirection: "column", gap: 16, animation: "up .25s ease" }}>
+
+        {/* STEP 0 — Personal Info */}
+        {step === 0 && (<>
+          <div style={{ background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 14, padding: "12px 16px", display: "flex", gap: 10 }}>
+            <Icon name="info" size={18} color={C.accent} />
+            <span style={{ color: C.text, fontSize: 13, lineHeight: 1.6 }}>Your personal information is encrypted and only used for identity verification.</span>
+          </div>
+          <div>
+            {/* Profile photo */}
+            <Label text="Profile Photo" required />
+            <ImgPicker field="profilePhoto" label="Upload Profile Photo" hint="Clear face photo, no sunglasses" />
+          </div>
+          <div><Label text="Full Legal Name" required />
+            <input style={inputStyle} placeholder="As it appears on your ID" value={form.fullName} onChange={e => set("fullName", e.target.value)} />
+          </div>
+          <div style={{ display: "flex", gap: 12 }}>
+            <div style={{ flex: 1 }}><Label text="Date of Birth" required />
+              <input style={inputStyle} type="date" value={form.dob} onChange={e => set("dob", e.target.value)} />
             </div>
-            <button onClick={() => setStep(2)} style={{ width: "100%", padding: "15px", background: C.accent, border: "none", borderRadius: 14, color: "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
-              I meet the requirements →
-            </button>
+            <div style={{ flex: 1 }}><Label text="Gender" required />
+              <select style={selectStyle} value={form.gender} onChange={e => set("gender", e.target.value)}>
+                <option value="">Select</option>
+                {["Male","Female","Prefer not to say"].map(g => <option key={g} value={g}>{g}</option>)}
+              </select>
+            </div>
           </div>
-        )}
+          <div><Label text="Phone Number" required />
+            <input style={inputStyle} type="tel" placeholder="+234 800 000 0000" value={form.phone} onChange={e => set("phone", e.target.value)} />
+          </div>
+          <div><Label text="Email Address" required />
+            <input style={inputStyle} type="email" placeholder="your@email.com" value={form.email} onChange={e => set("email", e.target.value)} />
+          </div>
+        </>)}
 
-        {/* Step 2 — Application form */}
-        {step === 2 && (
-          <div style={{ animation: "up .3s ease" }}>
-            <div className="disp" style={{ fontSize: 22, color: C.text, marginBottom: 6 }}>Your application</div>
-            <div style={{ color: C.sub, fontSize: 13, marginBottom: 20 }}>Takes about 2 minutes to complete.</div>
+        {/* STEP 1 — Address */}
+        {step === 1 && (<>
+          <div><Label text="State" required />
+            <select style={selectStyle} value={form.state} onChange={e => set("state", e.target.value)}>
+              <option value="">Select state</option>
+              {STATES.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div><Label text="Local Government Area (LGA)" required />
+            <input style={inputStyle} placeholder="e.g. Eti-Osa, Surulere" value={form.lga} onChange={e => set("lga", e.target.value)} />
+          </div>
+          <div><Label text="Area / Neighbourhood" required />
+            <input style={inputStyle} placeholder="e.g. Lekki Phase 1, Ikeja GRA" value={form.area} onChange={e => set("area", e.target.value)} />
+          </div>
+          <div><Label text="Full Street Address" required />
+            <input style={inputStyle} placeholder="House number, street name" value={form.address} onChange={e => set("address", e.target.value)} />
+          </div>
+        </>)}
 
-            <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 20 }}>
-              <Input C={C} icon="👤" placeholder="Full name *" value={form.name} onChange={e => setForm(f => ({...f, name: e.target.value}))} />
-              <Input C={C} icon="📞" placeholder="Phone number *" type="tel" value={form.phone} onChange={e => setForm(f => ({...f, phone: e.target.value}))} />
-              <Input C={C} icon="📍" placeholder="Delivery area (e.g. Lekki, VI)" value={form.area} onChange={e => setForm(f => ({...f, area: e.target.value}))} />
-
-              {/* Vehicle type */}
-              <div>
-                <div style={{ color: C.sub, fontSize: 12, fontWeight: 600, marginBottom: 8, paddingLeft: 2 }}>Vehicle type *</div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  {VEHICLES.map(v => (
-                    <div key={v.id} onClick={() => setForm(f => ({...f, vehicle: v.id}))} style={{ background: form.vehicle === v.id ? C.accentBg : C.card, border: `1.5px solid ${form.vehicle === v.id ? C.accent : C.border}`, borderRadius: 12, padding: "11px 12px", cursor: "pointer", transition: "all .15s" }}>
-                      <div style={{ fontSize: 22, marginBottom: 4 }}>{v.emoji}</div>
-                      <div style={{ fontWeight: 600, fontSize: 13, color: C.text }}>{v.label}</div>
-                      <div style={{ color: form.vehicle === v.id ? C.accent : C.muted, fontSize: 12, marginTop: 2 }}>{v.tip}</div>
+        {/* STEP 2 — KYC / Identity */}
+        {step === 2 && (<>
+          <div><Label text="ID Type" required />
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {ID_TYPES.map(t => {
+                const sel = form.idType === t.id;
+                return (
+                  <div key={t.id} onClick={() => set("idType", t.id)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 14px", background: sel ? C.accentBg : C.card, border: `2px solid ${sel ? C.accent : C.border}`, borderRadius: 14, cursor: "pointer", transition: "all .15s" }}>
+                    <div style={{ width: 36, height: 36, borderRadius: 10, background: sel ? C.accent : C.surface, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <Icon name="shield" size={18} color={sel ? "#fff" : C.muted} />
                     </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Bank details */}
-              <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 13, padding: "13px 15px" }}>
-                <div style={{ fontWeight: 600, fontSize: 13, color: C.text, marginBottom: 10 }}>🏦 Bank details (for payouts)</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-                  <Input C={C} placeholder="Bank name (e.g. GTBank)" value={form.bank} onChange={e => setForm(f => ({...f, bank: e.target.value}))} />
-                  <Input C={C} placeholder="Account number *" type="number" value={form.acctNo} onChange={e => setForm(f => ({...f, acctNo: e.target.value}))} />
-                  <Input C={C} placeholder="BVN (optional, for faster verification)" type="number" value={form.bvn} onChange={e => setForm(f => ({...f, bvn: e.target.value}))} />
-                </div>
-              </div>
-            </div>
-
-            <button onClick={() => setStep(3)} style={{ width: "100%", padding: "15px", background: C.accent, border: "none", borderRadius: 14, color: "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
-              Next: See your earnings →
-            </button>
-          </div>
-        )}
-
-        {/* Step 3 — Earnings preview */}
-        {step === 3 && (
-          <div style={{ animation: "up .3s ease" }}>
-            <div className="disp" style={{ fontSize: 22, color: C.text, marginBottom: 6 }}>Your earning potential</div>
-            <div style={{ color: C.sub, fontSize: 13, marginBottom: 20 }}>Based on {form.vehicle === "bike" ? "motorcycle" : form.vehicle} in {form.area || "Lagos"}</div>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 }}>
-              {EARNINGS.map((e, i) => (
-                <div key={i} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 13, padding: "13px 15px", display: "flex", alignItems: "center", gap: 13 }}>
-                  <div style={{ width: 40, height: 40, borderRadius: 11, background: C.accentBg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>{e.icon}</div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600, fontSize: 13, color: C.text }}>{e.title}</div>
-                    <div style={{ color: C.sub, fontSize: 12, marginTop: 2 }}>{e.desc}</div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 700, fontSize: 14, color: sel ? C.accent : C.text }}>{t.label}</div>
+                      <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{t.sub}</div>
+                    </div>
+                    <div style={{ width: 20, height: 20, borderRadius: "50%", border: `2px solid ${sel ? C.accent : C.border}`, background: sel ? C.accent : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      {sel && <Icon name="check" size={10} color="#fff" strokeWidth={3} />}
+                    </div>
                   </div>
-                  <div className="disp" style={{ fontSize: 14, color: C.accent, textAlign: "right", flexShrink: 0 }}>{e.value}</div>
-                </div>
-              ))}
+                );
+              })}
             </div>
-
-            {/* Sample weekly calc */}
-            <div style={{ background: `linear-gradient(135deg, ${C.accent}, #FF9500)`, borderRadius: 16, padding: "18px 20px", marginBottom: 20, color: "#fff" }}>
-              <div style={{ fontSize: 13, opacity: 0.85, marginBottom: 4 }}>If you do 8 orders/day, 5 days/week</div>
-              <div className="disp" style={{ fontSize: 28, marginBottom: 2 }}>₦96,000+</div>
-              <div style={{ fontSize: 12, opacity: 0.75 }}>estimated monthly earnings</div>
-            </div>
-
-            <button onClick={submit} disabled={submitting} style={{ width: "100%", padding: "15px", background: submitting ? C.border : C.green, border: "none", borderRadius: 14, color: submitting ? C.muted : "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 15, cursor: submitting ? "default" : "pointer" }}>
-              {submitting ? "Submitting…" : "Submit application 🚀"}
-            </button>
           </div>
-        )}
-
-        {/* Step 4 — Done */}
-        {step === 4 && (
-          <div style={{ animation: "up .3s ease", textAlign: "center", padding: "20px 0" }}>
-            <div style={{ fontSize: 72, marginBottom: 20 }}>🎉</div>
-            <div className="disp" style={{ fontSize: 24, color: C.text, marginBottom: 10 }}>Application submitted!</div>
-            <div style={{ color: C.sub, fontSize: 14, lineHeight: 1.7, marginBottom: 32, maxWidth: 320, margin: "0 auto 32px" }}>
-              We'll review your application within 24 hours and send you an SMS when you're approved.
+          {form.idType && (<>
+            <div><Label text="ID Number" required />
+              <input style={inputStyle} placeholder={form.idType === "nin" ? "11-digit NIN" : "ID number"} value={form.idNumber} onChange={e => set("idNumber", e.target.value)} />
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {[["📱","Download shopper app","Coming soon"],["💬","Join shopper WhatsApp group","wa.me/errandng"],["📖","Read shopper guide","Learn best practices"]].map(([ic, label, sub]) => (
-                <div key={label} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 13, padding: "13px 15px", display: "flex", alignItems: "center", gap: 12, textAlign: "left" }}>
-                  <span style={{ fontSize: 24 }}>{ic}</span>
-                  <div>
-                    <div style={{ fontWeight: 600, fontSize: 13.5, color: C.text }}>{label}</div>
-                    <div style={{ color: C.muted, fontSize: 12, marginTop: 1 }}>{sub}</div>
+            <div><Label text="Upload ID — Front" required />
+              <ImgPicker field="idFront" label="Upload Front of ID" hint="Clear photo, all 4 corners visible" />
+            </div>
+            <div><Label text="Upload ID — Back" />
+              <ImgPicker field="idBack" label="Upload Back of ID (optional)" hint="Required for driver's licence & voter card" />
+            </div>
+            <div><Label text="Selfie with ID" required />
+              <ImgPicker field="selfie" label="Take Selfie Holding Your ID" hint="Hold your ID next to your face. Good lighting." />
+            </div>
+          </>)}
+          <div><Label text="BVN (Bank Verification Number)" />
+            <input style={inputStyle} placeholder="11-digit BVN" maxLength={11} value={form.bvn} onChange={e => set("bvn", e.target.value)} />
+            <div style={{ color: C.muted, fontSize: 12, marginTop: 6 }}>Your BVN is encrypted. Dial *565*0# to get your BVN.</div>
+          </div>
+        </>)}
+
+        {/* STEP 3 — Shopper Details */}
+        {step === 3 && (<>
+          <div><Label text="Delivery Vehicle" required />
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {VEHICLES.map(v => {
+                const sel = form.vehicle === v.id;
+                return (
+                  <div key={v.id} onClick={() => set("vehicle", v.id)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 14px", background: sel ? C.accentBg : C.card, border: `2px solid ${sel ? C.accent : C.border}`, borderRadius: 14, cursor: "pointer", transition: "all .15s" }}>
+                    <div style={{ width: 40, height: 40, borderRadius: 12, background: sel ? C.accent : C.surface, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <Icon name={v.icon} size={20} color={sel ? "#fff" : C.muted} />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 700, fontSize: 14, color: sel ? C.accent : C.text }}>{v.label}</div>
+                      <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{v.pay}</div>
+                    </div>
+                    {sel && <Icon name="check" size={18} color={C.accent} />}
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
-            <button onClick={() => goTo("shopper-hub")} style={{ width: "100%", marginTop: 24, padding: "15px", background: C.accent, border: "none", borderRadius: 14, color: "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>
-              Go to Shopper Hub →
-            </button>
           </div>
-        )}
+          <div><Label text="Available Hours" required />
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {HOURS.map(h => {
+                const sel = form.workingHours.includes(h);
+                return (
+                  <div key={h} onClick={() => set("workingHours", sel ? form.workingHours.filter(x => x !== h) : [...form.workingHours, h])}
+                    style={{ padding: "8px 16px", borderRadius: 100, border: `1.5px solid ${sel ? C.accent : C.border}`, background: sel ? C.accentBg : "transparent", cursor: "pointer", fontSize: 13, fontWeight: sel ? 700 : 400, color: sel ? C.accent : C.sub, transition: "all .15s" }}>{h}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>)}
+
+        {/* STEP 4 — Bank Details */}
+        {step === 4 && (<>
+          <div style={{ background: C.greenBg, border: `1px solid ${C.green}33`, borderRadius: 14, padding: "12px 16px", display: "flex", gap: 10 }}>
+            <Icon name="shield" size={18} color={C.green} />
+            <span style={{ color: C.text, fontSize: 13, lineHeight: 1.6 }}>Your bank details are secured with 256-bit encryption and used only for payouts.</span>
+          </div>
+          <div><Label text="Bank Name" required />
+            <select style={selectStyle} value={form.bankName} onChange={e => set("bankName", e.target.value)}>
+              <option value="">Select your bank</option>
+              {BANKS.map(b => <option key={b} value={b}>{b}</option>)}
+            </select>
+          </div>
+          <div><Label text="Account Number" required />
+            <input style={inputStyle} placeholder="10-digit account number" maxLength={10} value={form.acctNumber} onChange={e => set("acctNumber", e.target.value)} />
+          </div>
+          <div><Label text="Account Name" required />
+            <input style={inputStyle} placeholder="As it appears on your bank statement" value={form.acctName} onChange={e => set("acctName", e.target.value)} />
+          </div>
+        </>)}
+
+        {/* STEP 5 — Review */}
+        {step === 5 && (<>
+          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, overflow: "hidden" }}>
+            {[
+              ["Full Name",    form.fullName],
+              ["Date of Birth",form.dob],
+              ["Phone",        form.phone],
+              ["Email",        form.email],
+              ["Location",     [form.area, form.state].filter(Boolean).join(", ")],
+              ["ID Type",      ID_TYPES.find(t=>t.id===form.idType)?.label || "—"],
+              ["ID Number",    form.idNumber ? form.idNumber.replace(/.(?=.{4})/g,"•") : "—"],
+              ["Vehicle",      VEHICLES.find(v=>v.id===form.vehicle)?.label || "—"],
+              ["Working Hrs",  form.workingHours.join(", ") || "—"],
+              ["Bank",         form.bankName],
+              ["Account",      form.acctNumber ? "••••••" + form.acctNumber.slice(-4) : "—"],
+            ].map(([k,v]) => (
+              <div key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: `1px solid ${C.border}` }}>
+                <span style={{ color: C.sub, fontSize: 13 }}>{k}</span>
+                <span style={{ color: C.text, fontSize: 13, fontWeight: 600, maxWidth: "55%", textAlign: "right" }}>{v || "—"}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 16px" }}>
+            <Icon name="shield" size={18} color={C.green} style={{ flexShrink: 0, marginTop: 1 }} />
+            <div style={{ color: C.sub, fontSize: 13, lineHeight: 1.7 }}>
+              By submitting, you confirm all information is accurate and agree to Errand's <span style={{ color: C.accent }}>Shopper Terms</span> and <span style={{ color: C.accent }}>Privacy Policy</span>.
+            </div>
+          </div>
+        </>)}
+      </div>
+
+      {/* Sticky CTA */}
+      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, padding: "14px 20px max(env(safe-area-inset-bottom,16px),16px)", background: C.bg, borderTop: `1px solid ${C.border}` }}>
+        <button onClick={step < STEPS.length - 1 ? () => setStep(s => s+1) : submit}
+          disabled={submitting}
+          style={{ width: "100%", height: 56, background: submitting ? C.border : `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 16, color: submitting ? C.muted : "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 16, cursor: submitting ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, boxShadow: submitting ? "none" : `0 8px 28px ${C.accentGlow}`, transition: "all .2s" }}>
+          {submitting
+            ? <><span style={{ width: 18, height: 18, border: "2.5px solid rgba(255,255,255,.3)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />Submitting…</>
+            : step < STEPS.length - 1
+              ? <>Continue <Icon name="chevronR" size={18} color="#fff" /></>
+              : <><Icon name="check" size={18} color="#fff" />Submit Application</>
+          }
+        </button>
       </div>
     </div>
   );
 }
+
 
 // ── ShopperRatings screen ─────────────────────────────────────
 function ShopperRatings({ goTo, C }) {
@@ -12524,7 +12638,7 @@ self.addEventListener('fetch', e => {
 
 
 function QAPanel({ C, onClose }) {
-  const ALL_ROUTES = ["home","stores","shoppers","cart","tracking","wallet","rewards","groupbuy","referral","pass","notifications","profile","search","orders","settings","help","create-list","shopper-hub","analytics","store-dashboard","products","disputes","meal-planner","commissions","promo-manager","gamification","payments","store-locator","addresses","support","social","ordering","business","shopper-onboarding","shopper-ratings","store-analytics","city-switcher","order-chat","launch-prep","push-settings","order-receipt","edit-profile","deploy-guide","admin-panel","store-reviews","pwa-install"];
+  const ALL_ROUTES = ["home","stores","shoppers","cart","tracking","wallet","rewards","groupbuy","referral","pass","notifications","profile","search","orders","settings","help","create-list","shopper-hub","analytics","store-dashboard","products","disputes","meal-planner","commissions","promo-manager","gamification","payments","store-locator","addresses","support","social","ordering","business","shopper-onboarding","store-onboarding","shopper-ratings","store-analytics","city-switcher","order-chat","launch-prep","push-settings","order-receipt","edit-profile","deploy-guide","admin-panel","store-reviews","pwa-install"];
   const [results, setResults] = useState([]);
   const [running, setRunning] = useState(false);
   const [tab, setTab] = useState("checks");
@@ -14250,7 +14364,7 @@ function SwipeableOrderCard({ order, onAccept, onDecline, C }) {
 }
 
 // ── Touch-optimised Nav (larger targets, haptic feedback) ─────
-function NavTouchTarget({ item, active, goTo, cartCount, C }) {
+function NavTouchTarget({ item, active, goTo, cartCount, notifBadge = 0, C }) {
   const [pressed, setPressed] = useState(false);
 
   const handlePress = () => {
@@ -15181,7 +15295,7 @@ function injectMicroAnimationCSS(C) {
 // ── SmartQuickActions — reordered by usage frequency ──────────
 const PersonalisedQuickActions = (props) => <SmartQuickActions {...props} />;
 function SmartQuickActions({ goTo, C }) {
-  const { track } = useP13n() || {};
+  const { track = () => {} } = useP13n() || {};
 
   const CATEGORIES = [
     {
@@ -15967,13 +16081,13 @@ const NAV_ITEMS = [
   { id: "home",         icon: "home",    label: "Home"     },
   { id: "orders",       icon: "orders",  label: "Orders"   },
   { id: "create-list",  icon: "add",     label: "",         isAdd: true },
-  { id: "meal-planner", icon: "food",    label: "Meals"    },
+  { id: "notifications",icon: "chat",    label: "Messages" },
   { id: "profile",      icon: "profile", label: "Profile"  },
 ];
 
 // HighContrastToggle — refined button for Settings
-function Nav({ view, goTo, cartCount, C }) {
-  const active = NAV_ITEMS.find(i => i.id === view)?.id || (view === "cart" ? "orders" : view);
+function Nav({ view, goTo, cartCount, notifBadge = 0, C }) {
+  const active = NAV_ITEMS.find(i => i.id === view)?.id || (view === "cart" ? "orders" : view === "order-chat" ? "notifications" : view);
   const [addPressed, setAddPressed] = useState(false);
   return (
     <div className="bottom-nav" style={{
@@ -16012,7 +16126,7 @@ function Nav({ view, goTo, cartCount, C }) {
           );
         }
         return (
-          <NavTouchTarget key={item.id} item={item} active={isActive} goTo={goTo} cartCount={cartCount} C={C} />
+          <NavTouchTarget key={item.id} item={item} active={isActive} goTo={goTo} cartCount={cartCount} notifBadge={notifBadge} C={C} />
         );
       })}
     </div>
@@ -16036,6 +16150,443 @@ function HCStyleInjector() {
   }, []);
   return null;
 }
+
+// ═══════════════════════════════════════════════════════════════
+//  STORE ONBOARDING — full KYC + store registration
+// ═══════════════════════════════════════════════════════════════
+function StoreOnboarding({ goTo, C }) {
+  const toast = useToast();
+  const { user } = useAuth() || {};
+  const [step, setStep]       = useState(0);
+  const [submitting, setSubmitting] = useState(false);
+  const [done, setDone]       = useState(false);
+
+  const [form, setForm] = useState({
+    // Owner personal
+    ownerName: "", dob: "", phone: "", email: "",
+    // Store info
+    storeName: "", storeCategory: "", storeDesc: "", storeWhatsapp: "",
+    // Location
+    state: "", lga: "", area: "", fullAddress: "", landmark: "",
+    // Operating hours
+    opensAt: "8:00 AM", closesAt: "8:00 PM", deliveryRadius: "5",
+    // Identity
+    idType: "", idNumber: "", cacNumber: "",
+    // Bank
+    bankName: "", acctNumber: "", acctName: "",
+    // Images
+    ownerPhoto: null, storeLogo: null, storeBanner: null,
+    idFront: null, cacCert: null,
+    // Products (array of {name, price, category, image})
+    products: [],
+  });
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const fileToBase64 = (file) => new Promise((res, rej) => {
+    const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file);
+  });
+
+  const pickImage = async (key) => {
+    const input = document.createElement("input");
+    input.type = "file"; input.accept = "image/*";
+    input.onchange = async (e) => {
+      const file = e.target.files[0]; if (!file) return;
+      if (file.size > 5 * 1024 * 1024) { toast("Image must be under 5MB", "error"); return; }
+      const b64 = await fileToBase64(file);
+      set(key, b64);
+    };
+    input.click();
+  };
+
+  const addProduct = () => {
+    set("products", [...form.products, { id: Date.now(), name: "", price: "", category: "", image: null }]);
+  };
+  const updateProduct = (id, k, v) => set("products", form.products.map(p => p.id === id ? { ...p, [k]: v } : p));
+  const removeProduct = (id) => set("products", form.products.filter(p => p.id !== id));
+  const pickProductImage = async (id) => {
+    const input = document.createElement("input");
+    input.type = "file"; input.accept = "image/*";
+    input.onchange = async (e) => {
+      const file = e.target.files[0]; if (!file) return;
+      const b64 = await fileToBase64(file);
+      updateProduct(id, "image", b64);
+    };
+    input.click();
+  };
+
+  const STEPS = [
+    { label: "Owner Info",      icon: "user"    },
+    { label: "Store Details",   icon: "store"   },
+    { label: "Location",        icon: "pin"     },
+    { label: "Identity (KYC)",  icon: "shield"  },
+    { label: "Products",        icon: "tag"     },
+    { label: "Bank Details",    icon: "wallet"  },
+    { label: "Review & Submit", icon: "check"   },
+  ];
+
+  const CATEGORIES = ["Groceries & Food","Beauty & Skincare","Electronics & Gadgets","Fashion & Clothing",
+    "Home & Kitchen","Health & Pharmacy","Sports & Fitness","Baby & Kids","Books & Stationery","Agriculture & Farm Fresh"];
+  const PROD_CATS = ["Groceries","Beverages","Snacks","Fresh Produce","Frozen Foods","Dairy","Bakery",
+    "Beauty","Skincare","Haircare","Electronics","Accessories","Clothing","Footwear","Home Decor","Kitchen","Pharmacy","Other"];
+  const BANKS = ["Access Bank","First Bank","GTBank","Zenith Bank","UBA","Fidelity Bank","Sterling Bank","Opay","Palmpay","Kuda Bank","Moniepoint"];
+  const STATES = ["Lagos","Abuja","Rivers","Kano","Ogun","Oyo","Enugu","Delta","Kaduna","Anambra"];
+  const ID_TYPES = [
+    { id: "nin",      label: "NIN Slip / Card"     },
+    { id: "passport", label: "International Passport" },
+    { id: "drivers",  label: "Driver's Licence"    },
+    { id: "intl_id",  label: "National ID Card"    },
+  ];
+
+  const submit = async () => {
+    setSubmitting(true);
+    try {
+      const storeData = {
+        user_id: user?.id || "guest",
+        owner_name: form.ownerName, dob: form.dob, phone: form.phone, email: form.email,
+        store_name: form.storeName, category: form.storeCategory, description: form.storeDesc,
+        whatsapp: form.storeWhatsapp, state: form.state, lga: form.lga,
+        area: form.area, address: form.fullAddress, landmark: form.landmark,
+        opens_at: form.opensAt, closes_at: form.closesAt,
+        delivery_radius_km: Number(form.deliveryRadius),
+        id_type: form.idType, id_number: form.idNumber, cac_number: form.cacNumber,
+        bank_name: form.bankName, acct_number: form.acctNumber, acct_name: form.acctName,
+        product_count: form.products.length,
+        has_logo: !!form.storeLogo, has_banner: !!form.storeBanner,
+        has_id: !!form.idFront, has_cac: !!form.cacCert,
+        status: "pending", submitted_at: new Date().toISOString(),
+      };
+      await sbDB.insert("stores", storeData);
+    } catch(e) { console.warn("Save failed:", e.message); }
+    setSubmitting(false);
+    setDone(true);
+  };
+
+  // ── Success ────────────────────────────────────────────────
+  if (done) return (
+    <div className="screen" style={{ background: C.bg, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "40px 24px", paddingBottom: 100 }}>
+      <div style={{ textAlign: "center", animation: "up .4s ease", width: "100%", maxWidth: 400 }}>
+        <div style={{ width: 88, height: 88, borderRadius: 26, background: C.greenBg, border: `1.5px solid ${C.green}44`, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", boxShadow: `0 8px 32px ${C.green}28` }}>
+          <Icon name="store" size={44} color={C.green} strokeWidth={1.8} />
+        </div>
+        <div className="disp" style={{ fontSize: 26, color: C.text, marginBottom: 8 }}>Store Submitted!</div>
+        <div style={{ color: C.sub, fontSize: 15, marginBottom: 28, lineHeight: 1.7 }}>
+          <strong style={{ color: C.text }}>{form.storeName}</strong> is under review. We'll activate your store within 24–72 hours.
+        </div>
+        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: "16px 18px", marginBottom: 28, textAlign: "left" }}>
+          {[
+            ["Owner identity", "Verified with NIMC/FRSC"],
+            ["CAC registration", form.cacNumber ? "Being verified" : "Not provided"],
+            ["Bank account", "Verification in progress"],
+            ["Store review", "24–72 hrs on weekdays"],
+            ["Go-live", "SMS + in-app notification"],
+          ].map(([k,v]) => (
+            <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: `1px solid ${C.border}` }}>
+              <span style={{ color: C.sub, fontSize: 13 }}>{k}</span>
+              <span style={{ color: C.text, fontSize: 13, fontWeight: 600, maxWidth: "55%", textAlign: "right" }}>{v}</span>
+            </div>
+          ))}
+        </div>
+        <Btn C={C} block onClick={() => goTo("home")}>Back to Home</Btn>
+      </div>
+    </div>
+  );
+
+  const progress = (step / (STEPS.length - 1)) * 100;
+  const inputStyle = { width: "100%", height: 52, background: C.dark ? "rgba(255,255,255,.04)" : "rgba(0,0,0,.03)", border: `1.5px solid ${C.border}`, borderRadius: 14, padding: "0 16px", color: C.text, fontSize: 15, outline: "none", fontFamily: "Satoshi,system-ui,sans-serif", boxSizing: "border-box" };
+  const selectStyle = { ...inputStyle, cursor: "pointer" };
+  const Label = ({ text, required }) => (
+    <div style={{ fontSize: 12, fontWeight: 800, color: C.sub, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+      {text}{required && <span style={{ color: C.accent }}> *</span>}
+    </div>
+  );
+  const ImgPicker = ({ field, label, hint, square }) => (
+    <div onClick={() => pickImage(field)} style={{ border: `2px dashed ${form[field] ? C.accent : C.border}`, borderRadius: 16, padding: square ? "12px" : "20px", textAlign: "center", cursor: "pointer", background: form[field] ? C.accentBg : C.surface, transition: "all .2s", height: square ? 100 : undefined }}>
+      {form[field]
+        ? <img src={form[field]} alt="" style={{ width: square ? 72 : 80, height: square ? 72 : 80, borderRadius: 12, objectFit: "cover", margin: "0 auto 6px", display: "block" }} />
+        : <div style={{ width: 48, height: 48, borderRadius: 14, background: C.card, border: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 8px" }}><Icon name="camera" size={22} color={C.muted} /></div>
+      }
+      <div style={{ fontWeight: 600, fontSize: 13, color: form[field] ? C.accent : C.text, marginBottom: 3 }}>{form[field] ? "✓ Uploaded" : label}</div>
+      {hint && !form[field] && <div style={{ color: C.muted, fontSize: 11 }}>{hint}</div>}
+    </div>
+  );
+
+  return (
+    <div className="screen" style={{ background: C.bg, paddingBottom: 100 }}>
+      {/* Header */}
+      <div style={{ padding: "52px 20px 16px", display: "flex", gap: 12, alignItems: "center" }}>
+        <Back onClick={() => step > 0 ? setStep(s => s-1) : goTo("profile")} C={C} />
+        <div style={{ flex: 1 }}>
+          <div className="disp" style={{ fontSize: 22, color: C.text, letterSpacing: "-0.03em" }}>Open Your Store</div>
+          <div style={{ color: C.sub, fontSize: 12, marginTop: 2 }}>Step {step+1} of {STEPS.length} · {STEPS[step].label}</div>
+        </div>
+      </div>
+
+      {/* Progress */}
+      <div style={{ height: 4, background: C.border, margin: "0 20px 20px", borderRadius: 2, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${progress}%`, background: `linear-gradient(90deg,${C.accent},#FF9500)`, borderRadius: 2, transition: "width .4s ease" }} />
+      </div>
+
+      {/* Step dots */}
+      <div className="hrow" style={{ paddingInline: 20, gap: 8, marginBottom: 24 }}>
+        {STEPS.map((s, i) => (
+          <div key={i} style={{ flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, opacity: i > step ? .4 : 1 }}>
+            <div style={{ width: 32, height: 32, borderRadius: "50%", background: i < step ? C.green : i === step ? C.accent : C.card, border: `2px solid ${i < step ? C.green : i === step ? C.accent : C.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              {i < step ? <Icon name="check" size={14} color="#fff" strokeWidth={2.5} /> : <Icon name={s.icon} size={14} color={i === step ? "#fff" : C.muted} />}
+            </div>
+            <span style={{ fontSize: 9.5, color: i === step ? C.accent : C.muted, fontWeight: i === step ? 700 : 400, whiteSpace: "nowrap" }}>{s.label.split(" ")[0]}</span>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ padding: "0 20px", display: "flex", flexDirection: "column", gap: 16, animation: "up .25s ease" }}>
+
+        {/* STEP 0 — Owner Info */}
+        {step === 0 && (<>
+          <div>
+            <Label text="Owner Profile Photo" required />
+            <ImgPicker field="ownerPhoto" label="Upload Your Photo" hint="Clear face photo, used for verification" />
+          </div>
+          <div><Label text="Owner Full Name" required />
+            <input style={inputStyle} placeholder="Legal name as on ID" value={form.ownerName} onChange={e => set("ownerName", e.target.value)} />
+          </div>
+          <div style={{ display: "flex", gap: 12 }}>
+            <div style={{ flex: 1 }}><Label text="Date of Birth" required />
+              <input style={inputStyle} type="date" value={form.dob} onChange={e => set("dob", e.target.value)} />
+            </div>
+          </div>
+          <div><Label text="Phone Number" required />
+            <input style={inputStyle} type="tel" placeholder="+234 800 000 0000" value={form.phone} onChange={e => set("phone", e.target.value)} />
+          </div>
+          <div><Label text="Email Address" required />
+            <input style={inputStyle} type="email" placeholder="business@email.com" value={form.email} onChange={e => set("email", e.target.value)} />
+          </div>
+        </>)}
+
+        {/* STEP 1 — Store Details */}
+        {step === 1 && (<>
+          <div><Label text="Store Logo" required />
+            <ImgPicker field="storeLogo" label="Upload Store Logo" hint="Square image, min 200×200px" square />
+          </div>
+          <div><Label text="Store Banner" />
+            <ImgPicker field="storeBanner" label="Upload Store Banner (optional)" hint="Wide image shown at top of store page. 1200×400px recommended." />
+          </div>
+          <div><Label text="Store Name" required />
+            <input style={inputStyle} placeholder="e.g. Mama Ngozi Foods" value={form.storeName} onChange={e => set("storeName", e.target.value)} />
+          </div>
+          <div><Label text="Store Category" required />
+            <select style={selectStyle} value={form.storeCategory} onChange={e => set("storeCategory", e.target.value)}>
+              <option value="">Select category</option>
+              {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div><Label text="Store Description" required />
+            <textarea value={form.storeDesc} onChange={e => set("storeDesc", e.target.value)} placeholder="Tell customers what you sell and what makes your store special…" rows={3}
+              style={{ ...inputStyle, height: "auto", padding: "14px 16px", resize: "none", lineHeight: 1.6 }} />
+          </div>
+          <div><Label text="WhatsApp Number" />
+            <input style={inputStyle} type="tel" placeholder="For customer enquiries (optional)" value={form.storeWhatsapp} onChange={e => set("storeWhatsapp", e.target.value)} />
+          </div>
+          <div style={{ display: "flex", gap: 12 }}>
+            <div style={{ flex: 1 }}><Label text="Opens At" />
+              <select style={selectStyle} value={form.opensAt} onChange={e => set("opensAt", e.target.value)}>
+                {["6:00 AM","7:00 AM","8:00 AM","9:00 AM","10:00 AM"].map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div style={{ flex: 1 }}><Label text="Closes At" />
+              <select style={selectStyle} value={form.closesAt} onChange={e => set("closesAt", e.target.value)}>
+                {["5:00 PM","6:00 PM","7:00 PM","8:00 PM","9:00 PM","10:00 PM","12:00 AM"].map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+          </div>
+          <div><Label text="Delivery Radius (km)" />
+            <select style={selectStyle} value={form.deliveryRadius} onChange={e => set("deliveryRadius", e.target.value)}>
+              {["2","3","5","10","15","20"].map(r => <option key={r} value={r}>{r} km</option>)}
+            </select>
+          </div>
+        </>)}
+
+        {/* STEP 2 — Location */}
+        {step === 2 && (<>
+          <div><Label text="State" required />
+            <select style={selectStyle} value={form.state} onChange={e => set("state", e.target.value)}>
+              <option value="">Select state</option>
+              {STATES.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div><Label text="Local Government Area" required />
+            <input style={inputStyle} placeholder="e.g. Eti-Osa, Ikeja" value={form.lga} onChange={e => set("lga", e.target.value)} />
+          </div>
+          <div><Label text="Area / Neighbourhood" required />
+            <input style={inputStyle} placeholder="e.g. Lekki Phase 1, Allen Avenue" value={form.area} onChange={e => set("area", e.target.value)} />
+          </div>
+          <div><Label text="Full Store Address" required />
+            <input style={inputStyle} placeholder="House/shop number, street name" value={form.fullAddress} onChange={e => set("fullAddress", e.target.value)} />
+          </div>
+          <div><Label text="Nearest Landmark" />
+            <input style={inputStyle} placeholder="e.g. Opposite First Bank, Near Shoprite" value={form.landmark} onChange={e => set("landmark", e.target.value)} />
+          </div>
+        </>)}
+
+        {/* STEP 3 — Identity / KYC */}
+        {step === 3 && (<>
+          <div style={{ background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 14, padding: "12px 16px", display: "flex", gap: 10 }}>
+            <Icon name="shield" size={18} color={C.accent} />
+            <span style={{ color: C.text, fontSize: 13, lineHeight: 1.6 }}>Identity documents are required by Nigerian law for all e-commerce operators.</span>
+          </div>
+          <div><Label text="Owner ID Type" required />
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {ID_TYPES.map(t => {
+                const sel = form.idType === t.id;
+                return (
+                  <div key={t.id} onClick={() => set("idType", t.id)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 14px", background: sel ? C.accentBg : C.card, border: `2px solid ${sel ? C.accent : C.border}`, borderRadius: 14, cursor: "pointer" }}>
+                    <div style={{ width: 36, height: 36, borderRadius: 10, background: sel ? C.accent : C.surface, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <Icon name="shield" size={17} color={sel ? "#fff" : C.muted} />
+                    </div>
+                    <div style={{ flex: 1, fontWeight: 600, fontSize: 14, color: sel ? C.accent : C.text }}>{t.label}</div>
+                    {sel && <Icon name="check" size={18} color={C.accent} />}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          {form.idType && (<>
+            <div><Label text="ID Number" required />
+              <input style={inputStyle} placeholder="Enter ID number" value={form.idNumber} onChange={e => set("idNumber", e.target.value)} />
+            </div>
+            <div><Label text="Upload ID Document" required />
+              <ImgPicker field="idFront" label="Upload Your ID" hint="Clear photo, all 4 corners visible" />
+            </div>
+          </>)}
+          <div><Label text="CAC Registration Number (optional)" />
+            <input style={inputStyle} placeholder="RC/BN number (if registered)" value={form.cacNumber} onChange={e => set("cacNumber", e.target.value)} />
+          </div>
+          {form.cacNumber && (
+            <div><Label text="Upload CAC Certificate" />
+              <ImgPicker field="cacCert" label="Upload CAC Certificate" hint="Certificate of incorporation or business name" />
+            </div>
+          )}
+        </>)}
+
+        {/* STEP 4 — Products */}
+        {step === 4 && (<>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 16, color: C.text }}>Your Products</div>
+              <div style={{ color: C.sub, fontSize: 13, marginTop: 3 }}>Add items customers can order. You can add more later.</div>
+            </div>
+            <button onClick={addProduct} style={{ display: "flex", alignItems: "center", gap: 6, background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 10, padding: "8px 14px", color: C.accent, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "Satoshi,sans-serif" }}>
+              <Icon name="plus" size={14} color={C.accent} /> Add
+            </button>
+          </div>
+          {form.products.length === 0 && (
+            <div style={{ textAlign: "center", padding: "32px 20px", background: C.card, border: `1.5px dashed ${C.border}`, borderRadius: 18 }}>
+              <Icon name="tag" size={36} color={C.muted} strokeWidth={1.2} style={{ marginBottom: 12 }} />
+              <div style={{ color: C.sub, fontSize: 14 }}>No products yet. Tap "Add" to add your first product.</div>
+            </div>
+          )}
+          {form.products.map((p, idx) => (
+            <div key={p.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: 16, animation: "up .2s ease" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <span style={{ fontWeight: 700, fontSize: 14, color: C.text }}>Product {idx + 1}</span>
+                <button onClick={() => removeProduct(p.id)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", display: "flex", alignItems: "center" }}>
+                  <Icon name="trash" size={16} color={C.muted} />
+                </button>
+              </div>
+              {/* Product image */}
+              <div onClick={() => pickProductImage(p.id)} style={{ border: `2px dashed ${p.image ? C.accent : C.border}`, borderRadius: 12, padding: "12px", textAlign: "center", cursor: "pointer", background: p.image ? C.accentBg : C.surface, marginBottom: 12 }}>
+                {p.image
+                  ? <img src={p.image} alt="" style={{ width: 60, height: 60, borderRadius: 10, objectFit: "cover", margin: "0 auto", display: "block" }} />
+                  : <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, color: C.muted }}>
+                      <Icon name="camera" size={16} color={C.muted} />
+                      <span style={{ fontSize: 13 }}>Upload product photo</span>
+                    </div>
+                }
+              </div>
+              <input value={p.name} onChange={e => updateProduct(p.id, "name", e.target.value)}
+                placeholder="Product name" style={{ ...inputStyle, marginBottom: 10 }} />
+              <div style={{ display: "flex", gap: 10 }}>
+                <input value={p.price} onChange={e => updateProduct(p.id, "price", e.target.value)}
+                  placeholder="Price (₦)" type="number" style={{ ...inputStyle, flex: 1 }} />
+                <select value={p.category} onChange={e => updateProduct(p.id, "category", e.target.value)}
+                  style={{ ...selectStyle, flex: 1 }}>
+                  <option value="">Category</option>
+                  {PROD_CATS.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+            </div>
+          ))}
+          <div style={{ color: C.muted, fontSize: 12, textAlign: "center", padding: "8px 0" }}>
+            You can skip this step and add products from your Store Dashboard later.
+          </div>
+        </>)}
+
+        {/* STEP 5 — Bank Details */}
+        {step === 5 && (<>
+          <div style={{ background: C.greenBg, border: `1px solid ${C.green}33`, borderRadius: 14, padding: "12px 16px", display: "flex", gap: 10 }}>
+            <Icon name="shield" size={18} color={C.green} />
+            <span style={{ color: C.text, fontSize: 13, lineHeight: 1.6 }}>Bank details are encrypted. Payouts every Monday directly to your account.</span>
+          </div>
+          <div><Label text="Bank Name" required />
+            <select style={selectStyle} value={form.bankName} onChange={e => set("bankName", e.target.value)}>
+              <option value="">Select your bank</option>
+              {BANKS.map(b => <option key={b} value={b}>{b}</option>)}
+            </select>
+          </div>
+          <div><Label text="Account Number" required />
+            <input style={inputStyle} placeholder="10-digit account number" maxLength={10} value={form.acctNumber} onChange={e => set("acctNumber", e.target.value)} />
+          </div>
+          <div><Label text="Account Name" required />
+            <input style={inputStyle} placeholder="As it appears on your statement" value={form.acctName} onChange={e => set("acctName", e.target.value)} />
+          </div>
+        </>)}
+
+        {/* STEP 6 — Review */}
+        {step === 6 && (<>
+          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, overflow: "hidden" }}>
+            {[
+              ["Owner",       form.ownerName],
+              ["Store Name",  form.storeName],
+              ["Category",    form.storeCategory],
+              ["Location",    [form.area, form.state].filter(Boolean).join(", ")],
+              ["Hours",       `${form.opensAt} – ${form.closesAt}`],
+              ["ID Type",     ID_TYPES.find(t=>t.id===form.idType)?.label || "—"],
+              ["CAC Number",  form.cacNumber || "Not provided"],
+              ["Bank",        form.bankName],
+              ["Account",     form.acctNumber ? "••••••" + form.acctNumber.slice(-4) : "—"],
+              ["Products",    form.products.length ? `${form.products.length} product${form.products.length>1?"s":""}` : "Added later"],
+            ].map(([k,v]) => (
+              <div key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: `1px solid ${C.border}` }}>
+                <span style={{ color: C.sub, fontSize: 13 }}>{k}</span>
+                <span style={{ color: C.text, fontSize: 13, fontWeight: 600, maxWidth: "55%", textAlign: "right" }}>{v || "—"}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 16px" }}>
+            <Icon name="shield" size={18} color={C.green} style={{ flexShrink: 0, marginTop: 1 }} />
+            <div style={{ color: C.sub, fontSize: 13, lineHeight: 1.7 }}>
+              By submitting, you confirm all information is accurate and agree to Errand's <span style={{ color: C.accent }}>Store Terms</span> and <span style={{ color: C.accent }}>Privacy Policy</span>.
+            </div>
+          </div>
+        </>)}
+      </div>
+
+      {/* Sticky CTA */}
+      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, padding: "14px 20px max(env(safe-area-inset-bottom,16px),16px)", background: C.bg, borderTop: `1px solid ${C.border}` }}>
+        <button onClick={step < STEPS.length - 1 ? () => setStep(s => s+1) : submit}
+          disabled={submitting}
+          style={{ width: "100%", height: 56, background: submitting ? C.border : `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 16, color: submitting ? C.muted : "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 16, cursor: submitting ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, boxShadow: submitting ? "none" : `0 8px 28px ${C.accentGlow}`, transition: "all .2s" }}>
+          {submitting
+            ? <><span style={{ width: 18, height: 18, border: "2.5px solid rgba(255,255,255,.3)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />Submitting…</>
+            : step < STEPS.length - 1
+              ? <>Continue <Icon name="chevronR" size={18} color="#fff" /></>
+              : <><Icon name="check" size={18} color="#fff" />Submit Store</>
+          }
+        </button>
+      </div>
+    </div>
+  );
+}
+
 
 // ── ErrorBoundary — catches render errors gracefully ─────────
 class ErrorBoundary extends React.Component {
@@ -16072,7 +16623,7 @@ function AppInner() {
   const [hcOverride, setHcOverride] = useState(() => typeof window !== 'undefined' && window.matchMedia('(prefers-contrast: more)').matches);
   useEffect(() => { const mq = window.matchMedia('(prefers-contrast: more)'); const h = e => setHcOverride(e.matches); mq.addEventListener('change',h); return () => mq.removeEventListener('change',h); }, []);
   const C = withHighContrast(rawC, hcOverride);
-  useEffect(() => { document.documentElement.setAttribute('data-hc', String(hcOverride)); }, [hcOverride]);
+  useEffect(() => { if (typeof document !== 'undefined') document.documentElement.setAttribute('data-hc', String(hcOverride)); }, [hcOverride]);
   const dark = C?.dark ?? true;
   const setDark = (fn) => {
     const nextDark = typeof fn === 'function' ? fn(dark) : fn;
@@ -16101,6 +16652,7 @@ function AppInner() {
   const [cart, setCart] = useState([]);
 
   const cartCount = cart.reduce((s, i) => s + i.qty, 0);
+  const notifBadge = useNotifBadge();
 
   const addToCart = useCallback(p => {
     setCart(prev => {
@@ -16112,7 +16664,7 @@ function AppInner() {
   const [transDir, setTransDir] = useState('fwd');
   const [screenKey, setScreenKey] = useState(0);
 
-  const NAV_ORDER = ["home","stores","shoppers","cart","tracking","wallet","rewards","groupbuy","referral","pass","notifications","profile","search","orders","settings","help","verify-queue","create-list","shopper-hub","analytics","store-dashboard","products","disputes","meal-planner","smart-search","commissions","promo-manager","gamification","payments","store-locator","addresses","support","social","ordering","business","store-analytics","shopper-onboarding","shopper-ratings","city-switcher"];
+  const NAV_ORDER = ["home","stores","shoppers","cart","tracking","wallet","rewards","groupbuy","referral","pass","notifications","profile","search","orders","settings","help","verify-queue","create-list","shopper-hub","analytics","store-dashboard","products","disputes","meal-planner","smart-search","commissions","promo-manager","gamification","payments","store-locator","addresses","support","social","ordering","business","store-analytics","shopper-onboarding","store-onboarding","shopper-ratings","city-switcher"];
   const { track: behaviorTrack } = useBehavior() || {};
   const goTo = v => {
     const curIdx = NAV_ORDER.indexOf(view);
@@ -16124,7 +16676,7 @@ function AppInner() {
     behaviorTrack?.('view:' + v);
   };
 
-  const MAIN = ["home","stores","shoppers","cart","profile","tracking","wallet","rewards","groupbuy","referral","pass","notifications","search","orders","settings","help","verify-queue","create-list","shopper-hub","analytics","store-dashboard","products","disputes","meal-planner","smart-search","commissions","promo-manager","gamification","payments","store-locator","addresses","support","social","ordering","business","store-analytics","shopper-onboarding","shopper-ratings","city-switcher"];
+  const MAIN = ["home","stores","shoppers","cart","profile","tracking","wallet","rewards","groupbuy","referral","pass","notifications","search","orders","settings","help","verify-queue","create-list","shopper-hub","analytics","store-dashboard","products","disputes","meal-planner","smart-search","commissions","promo-manager","gamification","payments","store-locator","addresses","support","social","ordering","business","store-analytics","shopper-onboarding","store-onboarding","shopper-ratings","city-switcher"];
   const { isShopperMode } = useShopperMode() || {};
   const [showA11y, setShowA11y] = useState(false);
   const showNav = phase === "app" && !sub && MAIN.includes(view);
@@ -16168,6 +16720,7 @@ function AppInner() {
         case "analytics":     return <AnalyticsDashboard goTo={goTo} C={C} />;
         case "store-analytics":    return <StoreAnalytics goTo={goTo} C={C} />;
         case "shopper-onboarding": return <ShopperOnboarding goTo={goTo} C={C} />;
+        case "store-onboarding":  return <StoreOnboarding goTo={goTo} C={C} />;
         case "shopper-ratings":    return <ShopperRatings goTo={goTo} C={C} />;
         case "city-switcher":      return <CitySwitcher goTo={goTo} C={C} />;
         case "order-chat":         return <OrderChat goTo={goTo} C={C} />;
@@ -16208,7 +16761,14 @@ function AppInner() {
       <SkipLink C={C} />
       <HCStyleInjector />
       {phase === "splash" && <EnhancedSplash onDone={() => setPhase("auth")} C={C} />}
-      {phase === "auth" && <AuthScreen onDone={() => setPhase("onboarding")} onDemo={() => { try { safeStorage.setItem("errand-onboarded","1"); } catch {} setPhase("app"); }} C={C} />}
+      {phase === "auth" && <AuthScreen 
+        onDone={(route) => {
+          try { safeStorage.setItem("errand-onboarded","1"); } catch {}
+          if (route === "shopper-onboarding") { setPhase("app"); setTimeout(() => goTo("shopper-onboarding"), 100); }
+          else if (route === "store-onboarding") { setPhase("app"); setTimeout(() => goTo("store-onboarding"), 100); }
+          else { setPhase("app"); }
+        }}
+        onDemo={() => { try { safeStorage.setItem("errand-onboarded","1"); } catch {} setPhase("app"); }} C={C} />}
       {phase === "onboarding" && <Onboarding onDone={() => {
         try { safeStorage.setItem('errand-onboarded', '1'); } catch {}
         setPhase("app");
@@ -16250,7 +16810,7 @@ function AppInner() {
           <div role="main" id="main-content" className="main-col" style={{ background: C.bg }}>
             <Screen />
           </div>
-          {!isDesktop && showNav && <Nav view={view} goTo={goTo} cartCount={cartCount} C={C} />}
+          {!isDesktop && showNav && <Nav view={view} goTo={goTo} cartCount={cartCount} notifBadge={notifBadge} C={C} />}
         </div>
         </>
       )}
