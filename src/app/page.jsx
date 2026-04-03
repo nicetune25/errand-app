@@ -29,6 +29,9 @@ const Icon = ({ name, size = 20, color = "currentColor", strokeWidth = 1.8, styl
     phone:      <svg viewBox="0 0 24 24" {...p} style={s}><rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="18" r="1" fill={color}/></svg>,
     mail:       <svg viewBox="0 0 24 24" {...p} style={s}><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 7l10 7 10-7"/></svg>,
     chat:       <svg viewBox="0 0 24 24" {...p} style={s}><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>,
+    alert:      <svg viewBox="0 0 24 24" {...p} style={s}><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 16h.01"/></svg>,
+    chat:       <svg viewBox="0 0 24 24" {...p} style={s}><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>,
+    alert:      <svg viewBox="0 0 24 24" {...p} style={s}><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 16h.01"/></svg>,
     lock:       <svg viewBox="0 0 24 24" {...p} style={s}><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>,
     copy:       <svg viewBox="0 0 24 24" {...p} style={s}><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>,
     share:      <svg viewBox="0 0 24 24" {...p} style={s}><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>,
@@ -707,21 +710,32 @@ const Back = ({ onClick, C, label }) => {
 };
 
 const Input = ({ value, onChange, placeholder, icon, type = "text", rows, C, style, onFocus, onBlur, label, id }) => {
+  const [focused, setFocused] = React.useState(false);
   const base = {
-    width: "100%", background: C.dark ? "rgba(255,255,255,.04)" : "rgba(0,0,0,.03)", border: `1.5px solid ${C.border}`,
-    borderRadius: 14, padding: icon ? "13px 15px 13px 44px" : "13px 15px",
-    color: C.text, fontSize: 14.5, outline: "none",
+    width: "100%",
+    background: C.dark ? "rgba(255,255,255,.05)" : "rgba(0,0,0,.04)",
+    border: `1.5px solid ${focused ? C.accent : C.border}`,
+    borderRadius: 14,
+    padding: icon ? "15px 15px 15px 46px" : "15px 16px",
+    color: C.text, fontSize: 16, outline: "none",
     fontFamily: "Satoshi,system-ui,sans-serif", lineHeight: 1.5,
-    transition: "border-color .18s, box-shadow .18s", ...style,
+    transition: "border-color .18s, box-shadow .18s, background .18s",
+    boxShadow: focused ? `0 0 0 3px ${C.accentBg}` : "none",
+    ...style,
   };
-  const foc = e => { e.target.style.borderColor = C.accent; e.target.style.boxShadow = `0 0 0 3px ${C.accentBg}`; onFocus && onFocus(e); };
-  const blu = e => { e.target.style.borderColor = C.border; e.target.style.boxShadow = 'none'; onBlur && onBlur(e); };
+  const handleFocus = e => { setFocused(true); onFocus && onFocus(e); };
+  const handleBlur  = e => { setFocused(false); onBlur && onBlur(e); };
   return (
     <div style={{ position: "relative" }}>
-      {icon && <span style={{ position: "absolute", left: 13, top: rows ? 12 : "50%", transform: rows ? "none" : "translateY(-50%)", fontSize: 15, color: C.muted, pointerEvents: "none" }}>{icon}</span>}
+      {icon && (
+        <span style={{ position: "absolute", left: 14, top: rows ? 14 : "50%", transform: rows ? "none" : "translateY(-50%)", fontSize: 16, color: focused ? C.accent : C.muted, pointerEvents: "none", transition: "color .18s" }}>{icon}</span>
+      )}
       {rows
-        ? <textarea value={value} onChange={onChange} placeholder={placeholder} rows={rows} style={{ ...base, resize: "none" }} onFocus={foc} onBlur={blu} />
-        : <input type={type} value={value} onChange={onChange} placeholder={placeholder} style={base} onFocus={foc} onBlur={blu} aria-label={label || placeholder} id={id} />
+        ? <textarea value={value} onChange={onChange} placeholder={placeholder} rows={rows}
+            style={{ ...base, resize: "none" }} onFocus={handleFocus} onBlur={handleBlur} />
+        : <input type={type} value={value} onChange={onChange} placeholder={placeholder}
+            style={base} onFocus={handleFocus} onBlur={handleBlur}
+            aria-label={label || placeholder} id={id} />
       }
     </div>
   );
@@ -963,77 +977,135 @@ function usePaystack() {
   return { ready, initPay, verify };
 }
 
-// ── Auth screen ─────────────────────────────────────────────
-// ═══════════════════════════════════════════════════════════════
-//  AUTH SCREEN — Email + Password (Supabase real-time auth)
-//  Flow: Welcome → Sign Up / Sign In → Success
-// ═══════════════════════════════════════════════════════════════
+// ── Auth screen ──────────────────────────────────────────────
+// Reusable labelled input with React focus state
+function AuthField({ label, value, onChange, type = "text", placeholder, hint, autoFocus, onKeyDown, rightSlot, C }) {
+  const [focused, setFocused] = React.useState(false);
+  const hasVal = value.length > 0;
+  return (
+    <div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: focused ? C.accent : C.sub, marginBottom: 8, transition: "color .18s" }}>{label}</div>
+      <div style={{ position: "relative" }}>
+        <input
+          value={value} onChange={onChange} type={type}
+          placeholder={placeholder} autoFocus={autoFocus} onKeyDown={onKeyDown}
+          onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+          style={{
+            width: "100%", height: 54, boxSizing: "border-box",
+            background: C.dark
+              ? (focused ? "rgba(255,255,255,.07)" : "rgba(255,255,255,.04)")
+              : (focused ? "#fff" : "rgba(0,0,0,.03)"),
+            border: `2px solid ${focused ? C.accent : hasVal ? C.border : C.border}`,
+            borderRadius: 14, padding: rightSlot ? "0 52px 0 16px" : "0 16px",
+            color: C.text, fontSize: 16, outline: "none",
+            fontFamily: "Satoshi,system-ui,sans-serif",
+            letterSpacing: type === "password" && !focused && hasVal ? "0.12em" : "normal",
+            boxShadow: focused ? `0 0 0 4px ${C.accentBg}` : "none",
+            transition: "border-color .18s, box-shadow .18s, background .18s",
+          }}
+        />
+        {rightSlot && (
+          <div style={{ position: "absolute", right: 0, top: 0, height: "100%", display: "flex", alignItems: "center", paddingRight: 14 }}>
+            {rightSlot}
+          </div>
+        )}
+      </div>
+      {hint && <div style={{ fontSize: 12, color: C.muted, marginTop: 6, lineHeight: 1.5 }}>{hint}</div>}
+    </div>
+  );
+}
+
 function AuthScreen({ onDone, onDemo, C }) {
   const { signIn, signUp } = useAuth() || {};
   const toast = useToast();
 
-  const [step, setStep]       = useState("welcome"); // welcome | signup | login | success
+  const [step, setStep]         = useState("welcome"); // welcome | signup | login | success
   const [userType, setUserType] = useState("customer");
-  const [form, setForm]       = useState({ name: "", email: "", password: "", dob: "" });
-  const [showPw, setShowPw]   = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError]     = useState("");
+  const [name, setName]         = useState("");
+  const [email, setEmail]       = useState("");
+  const [password, setPassword] = useState("");
+  const [showPw, setShowPw]     = useState(false);
+  const [loading, setLoading]   = useState(false);
+  const [error, setError]       = useState("");
 
-  const setF = (k, v) => { setForm(f => ({ ...f, [k]: v })); setError(""); };
-
-  const inputStyle = {
-    width: "100%", height: 54, background: C.dark ? "rgba(255,255,255,.05)" : "rgba(0,0,0,.04)",
-    border: `1.5px solid ${C.border}`, borderRadius: 14, padding: "0 16px",
-    color: C.text, fontSize: 16, outline: "none",
-    fontFamily: "Satoshi,system-ui,sans-serif", boxSizing: "border-box",
-    transition: "border-color .15s",
-  };
-  const focusStyle = { borderColor: C.accent, boxShadow: `0 0 0 3px ${C.accentBg}` };
+  const clearErr = () => setError("");
+  const isValidEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 
   const handleSignUp = async () => {
-    if (!form.name.trim())       { setError("Please enter your full name"); return; }
-    if (!form.email.trim())      { setError("Please enter your email address"); return; }
-    if (!/\S+@\S+\.\S+/.test(form.email)) { setError("Please enter a valid email"); return; }
-    if (form.password.length < 6){ setError("Password must be at least 6 characters"); return; }
-    setLoading(true);
+    if (!name.trim())          { setError("Please enter your full name"); return; }
+    if (!isValidEmail(email))  { setError("Please enter a valid email address"); return; }
+    if (password.length < 6)  { setError("Password must be at least 6 characters"); return; }
+    setLoading(true); clearErr();
     try {
-      await signUp(form.email, form.password, form.name, "", userType);
+      await signUp(email, password, name, "", userType);
       setStep("success");
     } catch (e) {
-      setError(e.message || "Sign up failed. Please try again.");
+      const msg = e.message || "";
+      if (msg.includes("already registered") || msg.includes("already exists")) {
+        setError("An account with this email already exists. Try signing in instead.");
+      } else {
+        setError(msg || "Sign up failed. Please try again.");
+      }
     }
     setLoading(false);
   };
 
   const handleSignIn = async () => {
-    if (!form.email.trim())  { setError("Please enter your email"); return; }
-    if (!form.password)      { setError("Please enter your password"); return; }
-    setLoading(true);
+    if (!isValidEmail(email)) { setError("Please enter a valid email address"); return; }
+    if (!password)            { setError("Please enter your password"); return; }
+    setLoading(true); clearErr();
     try {
-      await signIn(form.email, form.password);
+      await signIn(email, password);
       onDone();
     } catch (e) {
-      setError(e.message?.includes("Invalid") ? "Incorrect email or password" : e.message || "Sign in failed.");
+      const msg = e.message || "";
+      if (msg.includes("Invalid") || msg.includes("invalid_credentials")) {
+        setError("Incorrect email or password. Please try again.");
+      } else if (msg.includes("Email not confirmed")) {
+        setError("Please check your email and confirm your account first.");
+      } else {
+        setError(msg || "Sign in failed. Please try again.");
+      }
     }
     setLoading(false);
   };
 
-  // ── Shell wrapper ─────────────────────────────────────────
-  const Shell = ({ children, showBack, onBack, centered }) => (
+  const handleForgotPassword = async () => {
+    if (!isValidEmail(email)) { setError("Enter your email address above first, then tap Forgot password."); return; }
+    try {
+      await sbAuth.resetPassword(email);
+      toast("Reset link sent to " + email, "success");
+      clearErr();
+    } catch (e) { setError(e.message || "Could not send reset email."); }
+  };
+
+  // ── shared shell ──────────────────────────────────────────
+  const Shell = ({ children, showBack, onBack }) => (
     <div style={{
       minHeight: "100vh", background: C.bg, display: "flex", flexDirection: "column",
       backgroundImage: C.dark
-        ? `radial-gradient(ellipse 70% 50% at 10% 0%, ${C.accent}09 0%, transparent 55%), radial-gradient(ellipse 50% 40% at 90% 100%, ${C.purple}07 0%, transparent 55%)`
-        : `radial-gradient(ellipse 70% 50% at 10% 0%, ${C.accent}06 0%, transparent 55%)`,
+        ? `radial-gradient(ellipse 80% 60% at 15% 0%, ${C.accent}08 0%, transparent 50%), radial-gradient(ellipse 60% 50% at 85% 100%, rgba(155,111,255,.05) 0%, transparent 50%)`
+        : `radial-gradient(ellipse 80% 60% at 15% 0%, ${C.accent}05 0%, transparent 50%), radial-gradient(ellipse 60% 50% at 85% 100%, rgba(255,149,0,.04) 0%, transparent 50%)`,
     }}>
-      {showBack && (
-        <div style={{ padding: "52px 24px 0" }}>
-          <Back onClick={onBack} C={C} />
-        </div>
-      )}
-      <div style={{ flex: 1, padding: "0 24px 40px", display: "flex", flexDirection: centered ? "column" : "column", justifyContent: centered ? "center" : "flex-start" }}>
+      {showBack && <div style={{ padding: "52px 24px 0" }}><Back onClick={onBack} C={C} /></div>}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", padding: showBack ? "28px 24px 40px" : "0 24px 40px" }}>
         {children}
       </div>
+    </div>
+  );
+
+  // ── primary CTA ───────────────────────────────────────────
+  const CTA = ({ onClick, busy, label, busyLabel }) => (
+    <button onClick={onClick} disabled={busy}
+      style={{ width: "100%", height: 56, background: busy ? C.border : `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 16, color: busy ? C.muted : "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 17, cursor: busy ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, boxShadow: busy ? "none" : `0 8px 28px ${C.accentGlow}`, transition: "all .2s", letterSpacing: ".01em" }}>
+      {busy ? <><span style={{ width: 18, height: 18, border: "2.5px solid rgba(255,255,255,.25)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />{busyLabel}</> : label}
+    </button>
+  );
+
+  // ── error banner ─────────────────────────────────────────
+  const ErrBox = () => !error ? null : (
+    <div style={{ background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.22)", borderRadius: 12, padding: "11px 14px", color: "#EF4444", fontSize: 14, display: "flex", gap: 8, alignItems: "flex-start", lineHeight: 1.55, marginTop: 14 }}>
+      <Icon name="alert" size={16} color="#EF4444" style={{ flexShrink: 0, marginTop: 1 }} />{error}
     </div>
   );
 
@@ -1041,52 +1113,43 @@ function AuthScreen({ onDone, onDemo, C }) {
   // WELCOME
   // ══════════════════════════════════════════════════════════
   if (step === "welcome") return (
-    <Shell centered>
-      {/* Hero */}
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginBottom: 48 }}>
-        <div style={{ position: "relative", width: 200, height: 200, marginBottom: 36 }}>
-          <div style={{ width: 200, height: 200, borderRadius: "50%", background: C.dark ? `${C.accent}10` : `${C.accent}08`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <div style={{ width: 140, height: 140, borderRadius: "50%", background: C.dark ? `${C.accent}14` : `${C.accent}10`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <div style={{ width: 88, height: 88, borderRadius: 26, background: `linear-gradient(135deg,${C.accent},#FF9500)`, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 16px 48px ${C.accentGlow}` }}>
-                <Icon name="store" size={40} color="#fff" strokeWidth={1.6} />
-              </div>
+    <Shell>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", paddingTop: 56, paddingBottom: 24 }}>
+        {/* Hero illustration */}
+        <div style={{ position: "relative", width: 200, height: 200, marginBottom: 40 }}>
+          <div style={{ position: "absolute", inset: 0,  borderRadius: "50%", background: C.dark ? `${C.accent}09` : `${C.accent}07` }} />
+          <div style={{ position: "absolute", inset: 22, borderRadius: "50%", background: C.dark ? `${C.accent}12` : `${C.accent}09` }} />
+          <div style={{ position: "absolute", inset: 44, borderRadius: "50%", background: C.dark ? `${C.accent}17` : `${C.accent}12`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ width: 90, height: 90, borderRadius: 26, background: `linear-gradient(145deg,${C.accent},#FF9500)`, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 16px 48px ${C.accentGlow}` }}>
+              <Icon name="store" size={40} color="#fff" strokeWidth={1.5} />
             </div>
           </div>
-          {/* Floating badges */}
           {[
-            { icon: "bike",  label: "Shoppers", pos: { top: "5%",  left: "-8%"  }, color: "#00E087" },
-            { icon: "store", label: "Stores",   pos: { top: "10%", right: "-8%" }, color: C.accent  },
-            { icon: "zap",   label: "Fast",     pos: { bottom: "8%", left: "2%" }, color: "#9B6FFF" },
+            { icon: "bike",  label: "Shoppers", top: "2%",   left: "-12%", color: "#00E087" },
+            { icon: "store", label: "Stores",   top: "6%",   right: "-12%",color: C.accent  },
+            { icon: "zap",   label: "Fast",     bottom: "4%",left: "-4%",  color: "#9B6FFF" },
           ].map((b, i) => (
-            <div key={i} style={{ position: "absolute", ...b.pos, background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "6px 10px", display: "flex", alignItems: "center", gap: 6, boxShadow: "0 4px 16px rgba(0,0,0,.12)", animation: `float ${2.6 + i * 0.4}s ease-in-out infinite`, animationDelay: `${i * 0.3}s` }}>
-              <div style={{ width: 22, height: 22, borderRadius: 6, background: b.color + "22", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div key={i} style={{ position: "absolute", top: b.top, bottom: b.bottom, left: b.left, right: b.right, background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "6px 10px", display: "flex", alignItems: "center", gap: 6, boxShadow: "0 4px 16px rgba(0,0,0,.12)", animation: `float ${2.5 + i * 0.5}s ease-in-out infinite`, animationDelay: `${i * 0.25}s` }}>
+              <div style={{ width: 22, height: 22, borderRadius: 7, background: b.color + "20", display: "flex", alignItems: "center", justifyContent: "center" }}>
                 <Icon name={b.icon} size={12} color={b.color} />
               </div>
               <span style={{ fontSize: 11, fontWeight: 700, color: C.text }}>{b.label}</span>
             </div>
           ))}
         </div>
-
-        <div className="disp" style={{ fontSize: 32, color: C.text, textAlign: "center", letterSpacing: "-0.04em", lineHeight: 1.15, marginBottom: 12 }}>
-          Let's get started
-        </div>
-        <div style={{ color: C.sub, fontSize: 15, textAlign: "center", lineHeight: 1.7, maxWidth: 290 }}>
-          Shop, order errands and connect with personal shoppers across Lagos.
-        </div>
+        <div className="disp" style={{ fontSize: 34, color: C.text, textAlign: "center", letterSpacing: "-0.045em", lineHeight: 1.12, marginBottom: 14 }}>Let's get started</div>
+        <div style={{ color: C.sub, fontSize: 16, textAlign: "center", lineHeight: 1.75, maxWidth: 300 }}>Shop, order errands and connect with personal shoppers across Lagos.</div>
       </div>
-
-      {/* CTAs */}
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <button onClick={() => { setStep("signup"); setError(""); setForm({ name: "", email: "", password: "", dob: "" }); }}
-          style={{ width: "100%", height: 56, background: `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 16, color: "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 17, cursor: "pointer", boxShadow: `0 8px 28px ${C.accentGlow}`, letterSpacing: "0.01em" }}>
+        <button onClick={() => { setStep("signup"); clearErr(); setName(""); setEmail(""); setPassword(""); }}
+          style={{ width: "100%", height: 56, background: `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 16, color: "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 17, cursor: "pointer", boxShadow: `0 8px 32px ${C.accentGlow}`, letterSpacing: ".01em" }}>
           Create Account
         </button>
-        <button onClick={() => { setStep("login"); setError(""); setForm({ name: "", email: "", password: "", dob: "" }); }}
+        <button onClick={() => { setStep("login"); clearErr(); setEmail(""); setPassword(""); }}
           style={{ width: "100%", height: 56, background: "transparent", border: `1.5px solid ${C.border}`, borderRadius: 16, color: C.text, fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 600, fontSize: 17, cursor: "pointer" }}>
           Login to Account
         </button>
-        <button onClick={onDemo || onDone}
-          style={{ background: "none", border: "none", color: C.muted, fontSize: 13, cursor: "pointer", fontFamily: "Satoshi,sans-serif", padding: "8px", textAlign: "center" }}>
+        <button onClick={onDemo || onDone} style={{ background: "none", border: "none", color: C.muted, fontSize: 14, cursor: "pointer", fontFamily: "Satoshi,sans-serif", padding: "10px", textAlign: "center" }}>
           Continue as guest →
         </button>
       </div>
@@ -1098,80 +1161,46 @@ function AuthScreen({ onDone, onDemo, C }) {
   // ══════════════════════════════════════════════════════════
   if (step === "signup") return (
     <Shell showBack onBack={() => setStep("welcome")}>
-      <div style={{ paddingTop: 32 }}>
-        <div className="disp" style={{ fontSize: 30, color: C.text, letterSpacing: "-0.04em", marginBottom: 6 }}>Create Account</div>
-        <div style={{ color: C.sub, fontSize: 15, marginBottom: 32, lineHeight: 1.6 }}>Join thousands of Lagos shoppers on Errand.</div>
+      <div className="disp" style={{ fontSize: 28, color: C.text, letterSpacing: "-0.04em", marginBottom: 6 }}>Create Account</div>
+      <div style={{ color: C.sub, fontSize: 15, marginBottom: 28, lineHeight: 1.6 }}>Join thousands shopping smarter on Errand.</div>
 
-        {/* Account type */}
-        <div style={{ fontSize: 12, fontWeight: 800, color: C.sub, letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 10 }}>I am a</div>
-        <div style={{ display: "flex", gap: 8, marginBottom: 28 }}>
-          {[["customer","user","Customer"],["shopper","bike","Shopper"],["store","store","Store Owner"]].map(([id, icon, label]) => {
-            const sel = userType === id;
-            return (
-              <div key={id} onClick={() => setUserType(id)} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 7, padding: "14px 8px", borderRadius: 16, border: `2px solid ${sel ? C.accent : C.border}`, background: sel ? C.accentBg : C.card, cursor: "pointer", transition: "all .15s" }}>
-                <div style={{ width: 38, height: 38, borderRadius: 11, background: sel ? C.accent : C.surface, display: "flex", alignItems: "center", justifyContent: "center", transition: "background .15s" }}>
-                  <Icon name={icon} size={19} color={sel ? "#fff" : C.muted} />
-                </div>
-                <span style={{ fontSize: 12, fontWeight: sel ? 700 : 500, color: sel ? C.accent : C.sub }}>{label}</span>
+      {/* Account type */}
+      <div style={{ fontSize: 12, fontWeight: 800, color: C.sub, letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 10 }}>I want to join as</div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 26 }}>
+        {[["customer","user","Customer"],["shopper","bike","Shopper"],["store","store","Store"]].map(([id, icon, lbl]) => {
+          const sel = userType === id;
+          return (
+            <div key={id} onClick={() => setUserType(id)} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 7, padding: "14px 8px", borderRadius: 16, border: `2px solid ${sel ? C.accent : C.border}`, background: sel ? C.accentBg : C.card, cursor: "pointer", transition: "all .2s" }}>
+              <div style={{ width: 38, height: 38, borderRadius: 11, background: sel ? C.accent : C.surface, display: "flex", alignItems: "center", justifyContent: "center", transition: "all .2s", boxShadow: sel ? `0 4px 12px ${C.accentGlow}` : "none" }}>
+                <Icon name={icon} size={19} color={sel ? "#fff" : C.muted} />
               </div>
-            );
-          })}
-        </div>
-
-        {/* Fields */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 7 }}>Full Name</div>
-            <input value={form.name} onChange={e => setF("name", e.target.value)}
-              placeholder="John Doe" style={inputStyle}
-              onFocus={e => Object.assign(e.target.style, focusStyle)}
-              onBlur={e => { e.target.style.borderColor = C.border; e.target.style.boxShadow = "none"; }} />
-          </div>
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 7 }}>Email Address</div>
-            <input value={form.email} onChange={e => setF("email", e.target.value)}
-              type="email" placeholder="your@email.com" style={inputStyle}
-              onFocus={e => Object.assign(e.target.style, focusStyle)}
-              onBlur={e => { e.target.style.borderColor = C.border; e.target.style.boxShadow = "none"; }} />
-          </div>
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 7 }}>Password</div>
-            <div style={{ position: "relative" }}>
-              <input value={form.password} onChange={e => setF("password", e.target.value)}
-                type={showPw ? "text" : "password"} placeholder="Minimum 6 characters"
-                style={{ ...inputStyle, paddingRight: 48 }}
-                onFocus={e => Object.assign(e.target.style, focusStyle)}
-                onBlur={e => { e.target.style.borderColor = C.border; e.target.style.boxShadow = "none"; }} />
-              <button onClick={() => setShowPw(v => !v)} style={{ position: "absolute", right: 14, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", padding: 4 }}>
-                <Icon name={showPw ? "eyeOff" : "eye"} size={18} color={C.muted} />
-              </button>
+              <span style={{ fontSize: 12, fontWeight: sel ? 700 : 500, color: sel ? C.accent : C.sub }}>{lbl}</span>
             </div>
-          </div>
-        </div>
-
-        {error && (
-          <div style={{ marginTop: 14, background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.2)", borderRadius: 12, padding: "10px 14px", color: "#EF4444", fontSize: 14, display: "flex", gap: 8, alignItems: "center" }}>
-            <Icon name="alert" size={15} color="#EF4444" />{error}
-          </div>
-        )}
-
-        <div style={{ marginTop: 12, color: C.muted, fontSize: 12, lineHeight: 1.6 }}>
-          By creating an account you agree to our{" "}
-          <span style={{ color: C.accent, cursor: "pointer" }}>Terms of Service</span> and{" "}
-          <span style={{ color: C.accent, cursor: "pointer" }}>Privacy Policy</span>.
-        </div>
+          );
+        })}
       </div>
 
-      <div style={{ flex: 1, minHeight: 32 }} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+        <AuthField label="Full Name" value={name} onChange={e => { setName(e.target.value); clearErr(); }} placeholder="John Doe" C={C} autoFocus />
+        <AuthField label="Email Address" value={email} onChange={e => { setEmail(e.target.value); clearErr(); }} type="email" placeholder="your@email.com" C={C} />
+        <AuthField label="Password" value={password} onChange={e => { setPassword(e.target.value); clearErr(); }}
+          type={showPw ? "text" : "password"} placeholder="Minimum 6 characters"
+          hint="Use letters, numbers and symbols for a strong password." C={C}
+          rightSlot={<button onClick={() => setShowPw(v => !v)} style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", padding: 4 }}><Icon name={showPw ? "eyeOff" : "eye"} size={18} color={C.muted} /></button>}
+        />
+      </div>
 
-      <button onClick={handleSignUp} disabled={loading}
-        style={{ width: "100%", height: 56, background: loading ? C.border : `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 16, color: loading ? C.muted : "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 17, cursor: loading ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, boxShadow: loading ? "none" : `0 8px 28px ${C.accentGlow}`, transition: "all .2s", marginBottom: 16 }}>
-        {loading ? <><span style={{ width: 18, height: 18, border: "2.5px solid rgba(255,255,255,.25)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />Creating account…</> : "Create Account"}
-      </button>
+      <ErrBox />
+      <div style={{ flex: 1, minHeight: 20 }} />
 
-      <div style={{ textAlign: "center", color: C.sub, fontSize: 14 }}>
-        Already have an account?{" "}
-        <span onClick={() => { setStep("login"); setError(""); }} style={{ color: C.accent, fontWeight: 700, cursor: "pointer" }}>Sign in</span>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <CTA onClick={handleSignUp} busy={loading} label="Create Account" busyLabel="Creating account…" />
+        <div style={{ color: C.muted, fontSize: 12, textAlign: "center", lineHeight: 1.7 }}>
+          By continuing you agree to our <span style={{ color: C.accent, cursor: "pointer" }}>Terms</span> and <span style={{ color: C.accent, cursor: "pointer" }}>Privacy Policy</span>.
+        </div>
+        <div style={{ textAlign: "center", color: C.sub, fontSize: 14 }}>
+          Already have an account? <span onClick={() => { setStep("login"); clearErr(); }} style={{ color: C.accent, fontWeight: 700, cursor: "pointer" }}>Sign in</span>
+        </div>
       </div>
     </Shell>
   );
@@ -1181,57 +1210,32 @@ function AuthScreen({ onDone, onDemo, C }) {
   // ══════════════════════════════════════════════════════════
   if (step === "login") return (
     <Shell showBack onBack={() => setStep("welcome")}>
-      <div style={{ paddingTop: 32 }}>
-        <div className="disp" style={{ fontSize: 30, color: C.text, letterSpacing: "-0.04em", marginBottom: 6 }}>Welcome back</div>
-        <div style={{ color: C.sub, fontSize: 15, marginBottom: 36, lineHeight: 1.6 }}>Sign in to your Errand account.</div>
+      <div className="disp" style={{ fontSize: 28, color: C.text, letterSpacing: "-0.04em", marginBottom: 6 }}>Welcome back</div>
+      <div style={{ color: C.sub, fontSize: 15, marginBottom: 32, lineHeight: 1.6 }}>Sign in to continue to your account.</div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 7 }}>Email Address</div>
-            <input value={form.email} onChange={e => setF("email", e.target.value)}
-              type="email" placeholder="your@email.com" style={inputStyle}
-              onFocus={e => Object.assign(e.target.style, focusStyle)}
-              onBlur={e => { e.target.style.borderColor = C.border; e.target.style.boxShadow = "none"; }} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+        <AuthField label="Email Address" value={email} onChange={e => { setEmail(e.target.value); clearErr(); }} type="email" placeholder="your@email.com" C={C} autoFocus />
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: C.sub }}>Password</span>
+            <span onClick={handleForgotPassword} style={{ fontSize: 13, color: C.accent, fontWeight: 600, cursor: "pointer" }}>Forgot password?</span>
           </div>
-          <div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: C.sub }}>Password</div>
-              <span onClick={() => {
-                if (!form.email) { setError("Enter your email first"); return; }
-                sbAuth.resetPassword(form.email).then(() => toast("Reset link sent to " + form.email, "success")).catch(e => setError(e.message));
-              }} style={{ fontSize: 12, color: C.accent, fontWeight: 600, cursor: "pointer" }}>Forgot password?</span>
-            </div>
-            <div style={{ position: "relative" }}>
-              <input value={form.password} onChange={e => setF("password", e.target.value)}
-                type={showPw ? "text" : "password"} placeholder="Your password"
-                onKeyDown={e => e.key === "Enter" && handleSignIn()}
-                style={{ ...inputStyle, paddingRight: 48 }}
-                onFocus={e => Object.assign(e.target.style, focusStyle)}
-                onBlur={e => { e.target.style.borderColor = C.border; e.target.style.boxShadow = "none"; }} />
-              <button onClick={() => setShowPw(v => !v)} style={{ position: "absolute", right: 14, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", padding: 4 }}>
-                <Icon name={showPw ? "eyeOff" : "eye"} size={18} color={C.muted} />
-              </button>
-            </div>
-          </div>
+          <AuthField label="" value={password} onChange={e => { setPassword(e.target.value); clearErr(); }}
+            type={showPw ? "text" : "password"} placeholder="Your password"
+            onKeyDown={e => e.key === "Enter" && handleSignIn()} C={C}
+            rightSlot={<button onClick={() => setShowPw(v => !v)} style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", padding: 4 }}><Icon name={showPw ? "eyeOff" : "eye"} size={18} color={C.muted} /></button>}
+          />
         </div>
-
-        {error && (
-          <div style={{ marginTop: 14, background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.2)", borderRadius: 12, padding: "10px 14px", color: "#EF4444", fontSize: 14, display: "flex", gap: 8, alignItems: "center" }}>
-            <Icon name="alert" size={15} color="#EF4444" />{error}
-          </div>
-        )}
       </div>
 
+      <ErrBox />
       <div style={{ flex: 1, minHeight: 32 }} />
 
-      <button onClick={handleSignIn} disabled={loading}
-        style={{ width: "100%", height: 56, background: loading ? C.border : `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 16, color: loading ? C.muted : "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 17, cursor: loading ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, boxShadow: loading ? "none" : `0 8px 28px ${C.accentGlow}`, transition: "all .2s", marginBottom: 16 }}>
-        {loading ? <><span style={{ width: 18, height: 18, border: "2.5px solid rgba(255,255,255,.25)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />Signing in…</> : "Sign In"}
-      </button>
-
-      <div style={{ textAlign: "center", color: C.sub, fontSize: 14 }}>
-        Don't have an account?{" "}
-        <span onClick={() => { setStep("signup"); setError(""); }} style={{ color: C.accent, fontWeight: 700, cursor: "pointer" }}>Create one</span>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <CTA onClick={handleSignIn} busy={loading} label="Sign In" busyLabel="Signing in…" />
+        <div style={{ textAlign: "center", color: C.sub, fontSize: 14 }}>
+          Don't have an account? <span onClick={() => { setStep("signup"); clearErr(); }} style={{ color: C.accent, fontWeight: 700, cursor: "pointer" }}>Create one</span>
+        </div>
       </div>
     </Shell>
   );
@@ -1240,34 +1244,28 @@ function AuthScreen({ onDone, onDemo, C }) {
   // SUCCESS
   // ══════════════════════════════════════════════════════════
   if (step === "success") return (
-    <Shell centered>
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center" }}>
-        <div style={{ width: 100, height: 100, borderRadius: 30, background: `linear-gradient(135deg,${C.accent},#FF9500)`, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 28, boxShadow: `0 16px 48px ${C.accentGlow}`, animation: "bounceIn .5s var(--ease-spring)" }}>
-          <Icon name="check" size={48} color="#fff" strokeWidth={2.2} />
+    <Shell>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ width: 96, height: 96, borderRadius: 28, background: `linear-gradient(145deg,${C.accent},#FF9500)`, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 28, boxShadow: `0 20px 56px ${C.accentGlow}`, animation: "bounceIn .5s var(--ease-spring)" }}>
+          <Icon name="check" size={46} color="#fff" strokeWidth={2.2} />
         </div>
-        <div className="disp" style={{ fontSize: 32, color: C.text, letterSpacing: "-0.04em", marginBottom: 12 }}>
-          Account Created!
-        </div>
-        <div style={{ color: C.sub, fontSize: 15, lineHeight: 1.7, maxWidth: 280, marginBottom: 12 }}>
-          Welcome to Errand, <span style={{ color: C.text, fontWeight: 700 }}>{form.name.split(" ")[0]}</span>. You can now start shopping.
+        <div className="disp" style={{ fontSize: 32, color: C.text, letterSpacing: "-0.04em", marginBottom: 12 }}>Account Created!</div>
+        <div style={{ color: C.sub, fontSize: 16, textAlign: "center", lineHeight: 1.75, maxWidth: 280, marginBottom: userType !== "customer" ? 20 : 0 }}>
+          Welcome to Errand, <span style={{ color: C.text, fontWeight: 700 }}>{name.split(" ")[0] || "friend"}</span>. You're all set.
         </div>
         {userType !== "customer" && (
-          <div style={{ background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 14, padding: "12px 16px", marginBottom: 8, fontSize: 13, color: C.text, lineHeight: 1.6 }}>
-            Complete your <strong>{userType === "shopper" ? "shopper" : "store"}</strong> profile to start {userType === "shopper" ? "earning" : "selling"}.
+          <div style={{ background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 14, padding: "12px 18px", fontSize: 14, color: C.text, lineHeight: 1.65, textAlign: "center", maxWidth: 300 }}>
+            Complete your <strong>{userType === "shopper" ? "shopper" : "store"}</strong> profile to start {userType === "shopper" ? "earning" : "selling"} on Errand.
           </div>
         )}
       </div>
-
-      <div style={{ marginTop: 40 }}>
-        <button onClick={() => {
-          if (userType === "shopper") onDone("shopper-onboarding");
-          else if (userType === "store") onDone("store-onboarding");
-          else onDone();
-        }}
-          style={{ width: "100%", height: 56, background: `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 16, color: "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 17, cursor: "pointer", boxShadow: `0 8px 28px ${C.accentGlow}`, marginBottom: 12 }}>
-          {userType === "shopper" ? "Complete Shopper Profile →" : userType === "store" ? "Set Up Your Store →" : "Start Shopping →"}
-        </button>
-      </div>
+      <button onClick={() => {
+        if (userType === "shopper") onDone("shopper-onboarding");
+        else if (userType === "store") onDone("store-onboarding");
+        else onDone();
+      }} style={{ width: "100%", height: 56, background: `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 16, color: "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 17, cursor: "pointer", boxShadow: `0 8px 32px ${C.accentGlow}`, letterSpacing: ".01em", marginBottom: 8 }}>
+        {userType === "shopper" ? "Complete Shopper Profile →" : userType === "store" ? "Set Up Your Store →" : "Start Shopping →"}
+      </button>
     </Shell>
   );
 
@@ -1643,10 +1641,10 @@ body{font-size:calc(16px * var(--text-scale, 1));}
 .leaflet-control-zoom a:hover{background:var(--c-accent-bg)!important;}
 
 /* ── Touch targets ≥44px (WCAG 2.5.5) ── */
-.bottom-nav{height:82px;}.bottom-nav > *{min-height:82px;}
+.bottom-nav{height:calc(64px + env(safe-area-inset-bottom,0px));}.bottom-nav > *{min-height:64px;}
 
 /* ── Safe-area insets ── */
-.screen{padding-bottom:calc(96px + env(safe-area-inset-bottom, 0px));}
+.screen{padding-bottom:calc(80px + env(safe-area-inset-bottom, 0px));}
 
 /* ── 2026 Neo-minimal card ── */
 .neo-card{
@@ -14396,7 +14394,10 @@ function NavTouchTarget({ item, active, goTo, cartCount, notifBadge = 0, C }) {
       <div style={{ position: 'relative', width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 4 }}>
         <Icon name={item.icon} size={active ? 24 : 21} color={active ? C.accent : (C.dark ? 'rgba(255,255,255,.42)' : 'rgba(0,0,0,.32)')} strokeWidth={active ? 2.2 : 1.7} />
         {item.id === 'orders' && cartCount > 0 && (
-          <div style={{ position: 'absolute', top: -4, right: -6, minWidth: 16, height: 16, borderRadius: 8, background: C.accent, color: '#fff', fontSize: 12, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px', border: `2px solid ${C.bg}` }}>{cartCount > 9 ? '9+' : cartCount}</div>
+          <div style={{ position: 'absolute', top: -4, right: -6, minWidth: 16, height: 16, borderRadius: 8, background: C.accent, color: '#fff', fontSize: 9, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px', border: `2px solid ${C.bg}` }}>{cartCount > 9 ? '9+' : cartCount}</div>
+        )}
+        {item.id === 'notifications' && notifBadge > 0 && (
+          <div style={{ position: 'absolute', top: -4, right: -6, minWidth: 16, height: 16, borderRadius: 8, background: '#EF4444', color: '#fff', fontSize: 9, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px', border: `2px solid ${C.bg}`, animation: 'blink 2s ease-in-out infinite' }}>{notifBadge > 9 ? '9+' : notifBadge}</div>
         )}
       </div>
       <span style={{ fontSize: 12, fontWeight: active ? 700 : 500, color: active ? C.accent : (C.dark ? 'rgba(255,255,255,.4)' : 'rgba(0,0,0,.35)'), marginTop: 3, letterSpacing: .1, transition: 'color 200ms' }}>{item.label}</span>
@@ -14699,6 +14700,9 @@ function usePersonalization() {
 
 // ── PersonalizationContext ─────────────────────────────────────
 const PersonalizationContext = React.createContext(null);
+function PersonalizationProvider({ children }) {
+  return <PersonalizationContext.Provider value={null}>{children}</PersonalizationContext.Provider>;
+}
 function useP13n() { return React.useContext(PersonalizationContext) || {}; }
 
 
@@ -15160,7 +15164,7 @@ function KeyboardNav({ goTo, openA11y }) {
 
 // ── SmartHomeGrid — responsive home grid with personalization ─
 function SmartHomeGrid({ goTo, C }) {
-  const { widgetOrder, track, topCategories } = useP13n() || {};
+  const { widgetOrder = (x) => x, track = () => {}, topCategories = [] } = useP13n() || {};
   const [layout, setLayout] = useState('grid'); // grid | list
 
   const ALL_ACTIONS = [
@@ -15424,7 +15428,7 @@ function OnlineShoppersStrip({ goTo, C }) {
 
 // ── PersonalizationInsight — shows what the model learned ─────
 function PersonalizationInsight({ C, onDismiss }) {
-  const { topActions, reset } = useP13n() || {};
+  const { topActions = () => [], reset = () => {} } = useP13n() || {};
   const top = topActions(3);
   if (!top.length) return null;
 
@@ -16752,6 +16756,7 @@ function AppInner() {
 
   return (
     <A11yProvider>
+    <PersonalizationProvider>
     <ErrorBoundary C={C}>
     <ShopperModeProvider>
     <AuthProvider C={C}>
@@ -16847,6 +16852,7 @@ function AppInner() {
     </AuthProvider>
     </ShopperModeProvider>
     </ErrorBoundary>
+    </PersonalizationProvider>
     </A11yProvider>
   );
 }
@@ -17031,7 +17037,7 @@ function ContentReveal({ loading, skeleton, children, style }) {
 function useTFPersonalization() {
   const [tfReady, setTfReady]       = useState(false);
   const [tfModel, setTfModel]       = useState(null);
-  const { track, topActions, score, widgetOrder, model: hModel } = useP13n() || {};
+  const { track = () => {}, topActions = () => [], score = () => 0, widgetOrder = (x) => x, model: hModel } = useP13n() || {};
 
   // Load TF.js async (CDN)
   useEffect(() => {
