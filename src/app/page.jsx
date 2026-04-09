@@ -849,74 +849,135 @@ const useAuth = () => React.useContext(AuthContext);
 
 // ── useOrders hook (local mock) ───────────────────────────────
 function useOrders(userId) {
-  const [orders, setOrders] = useState([]);
+  const [orders, setOrders]   = useState([]);
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
+  const load = async () => {
     if (!userId) return;
     setLoading(true);
-    sbDB.select("orders", { filter: `user_id=eq.${userId}`, order: "created_at.desc", limit: 50 })
-      .then(rows => { setOrders(rows || []); setLoading(false); })
-      .catch(() => setLoading(false));
+    try {
+      const rows = await sbDB.select("orders", {
+        filter: `user_id=eq.${userId}`,
+        order: "created_at.desc",
+        limit: 50,
+      });
+      setOrders(rows || []);
+    } catch (e) { console.warn("Orders fetch:", e.message); }
+    setLoading(false);
+  };
 
-    // Realtime: listen for new/updated orders
-    const unsub = sbRealtime.subscribe("orders", (msg) => {
-      const rec = msg.payload?.record;
-      if (!rec || rec.user_id !== userId) return;
-      if (msg.payload?.eventType === "INSERT") setOrders(p => [rec, ...p]);
-      if (msg.payload?.eventType === "UPDATE") setOrders(p => p.map(o => o.id === rec.id ? rec : o));
+  useEffect(() => { load(); }, [userId]);
+
+  // Real-time subscription — orders update live
+  useEffect(() => {
+    if (!userId) return;
+    const sub = sbRealtime.subscribe("orders", `user_id=eq.${userId}`, (payload) => {
+      const { eventType, new: newRow, old: oldRow } = payload;
+      setOrders(prev => {
+        if (eventType === "INSERT") return [newRow, ...prev];
+        if (eventType === "UPDATE") return prev.map(o => o.id === newRow.id ? newRow : o);
+        if (eventType === "DELETE") return prev.filter(o => o.id !== oldRow.id);
+        return prev;
+      });
     });
-    return unsub;
+    return () => sbRealtime.unsubscribe(sub);
   }, [userId]);
 
   const placeOrder = async (items, total, storeId, address) => {
+    const oid = `ORD-${Date.now()}`;
     const record = await sbDB.insert("orders", {
-      user_id: userId, store_id: storeId,
-      items: JSON.stringify(items), total, address, status: "pending",
+      id: oid,
+      user_id: userId,
+      store_id: storeId || null,
+      items: JSON.stringify(items),
+      total,
+      status: "pending",
+      address: address || null,
+      created_at: new Date().toISOString(),
     });
-    return Array.isArray(record) ? record[0] : record;
+    await load();
+    return record;
   };
 
-  return { orders, loading, placeOrder };
+  const updateStatus = async (orderId, status) => {
+    await sbDB.update("orders", { status }, `id=eq.${orderId}`);
+  };
+
+  return { orders, loading, placeOrder, updateStatus, refresh: load };
 }
+
 
 // ── useTracking hook (Supabase Realtime) ─────────────────────
 function useTracking(orderId) {
-  const [status, setStatus] = useState("confirmed");
+  const [order, setOrder]       = useState(null);
+  const [status, setStatus]     = useState("confirmed");
   const [location, setLocation] = useState(null);
+  const [eta, setEta]           = useState(null);
   const [messages, setMessages] = useState([]);
+  const [loading, setLoading]   = useState(true);
+
+  // Statuses in order
+  const STATUSES = ["confirmed","preparing","assigned","picked_up","on_the_way","delivered"];
 
   useEffect(() => {
-    if (!orderId) return;
-    // Load initial messages
-    sbDB.select("messages", { filter: `order_id=eq.${orderId}`, order: "created_at.asc" })
-      .then(rows => setMessages(rows || []))
-      .catch(() => {});
+    if (!orderId) { setLoading(false); return; }
 
-    // Realtime order status + location updates
-    const unsubOrders = sbRealtime.subscribe("orders", (msg) => {
-      const rec = msg.payload?.record;
-      if (rec?.id === orderId) {
-        setStatus(rec.status);
-        if (rec.shopper_location) setLocation(rec.shopper_location);
-        // Fire push on status change
-        _pushBus.emit({ title: `Order ${rec.status}`, body: `Your order is now: ${rec.status}`, icon: "🛵" });
+    // Load order details
+    sbDB.select("orders", { filter: `id=eq.${orderId}`, limit: 1 })
+      .then(rows => {
+        const o = rows?.[0];
+        if (o) { setOrder(o); setStatus(o.status || "confirmed"); }
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+
+    // Load messages
+    sbDB.select("messages", { filter: `order_id=eq.${orderId}`, order: "created_at.asc" })
+      .then(rows => setMessages(rows || []));
+
+    // Real-time order status updates
+    const orderSub = sbRealtime.subscribe("orders", `id=eq.${orderId}`, (payload) => {
+      if (payload.new) {
+        setOrder(payload.new);
+        setStatus(payload.new.status || "confirmed");
+        if (payload.new.shopper_lat && payload.new.shopper_lng) {
+          setLocation({ lat: payload.new.shopper_lat, lng: payload.new.shopper_lng });
+        }
+        if (payload.new.eta_minutes) setEta(payload.new.eta_minutes);
       }
     });
-    // Realtime messages
-    const unsubMessages = sbRealtime.subscribe("messages", (msg) => {
-      const rec = msg.payload?.record;
-      if (rec?.order_id === orderId) setMessages(p => [...p, rec]);
+
+    // Real-time messages
+    const msgSub = sbRealtime.subscribe("messages", `order_id=eq.${orderId}`, (payload) => {
+      if (payload.eventType === "INSERT" && payload.new) {
+        setMessages(prev => [...prev, payload.new]);
+      }
     });
-    return () => { unsubOrders(); unsubMessages(); };
+
+    // Demo simulation — remove in production
+    let step = 0;
+    const sim = setInterval(() => {
+      step++;
+      if (step < STATUSES.length) setStatus(STATUSES[step]);
+      if (step === 2) setEta(18);
+      if (step === 3) setEta(12);
+      if (step === 4) setEta(5);
+      if (step >= STATUSES.length - 1) clearInterval(sim);
+    }, 8000);
+
+    return () => {
+      sbRealtime.unsubscribe(orderSub);
+      sbRealtime.unsubscribe(msgSub);
+      clearInterval(sim);
+    };
   }, [orderId]);
 
-  const sendMessage = async (userId, text) => {
-    await sbDB.insert("messages", { order_id: orderId, user_id: userId, text });
-  };
+  const statusIndex = STATUSES.indexOf(status);
+  const progress    = Math.round(((statusIndex + 1) / STATUSES.length) * 100);
 
-  return { status, location, messages, sendMessage };
+  return { order, status, statusIndex, progress, location, eta, messages, loading, STATUSES };
 }
+
 
 // ── Paystack SDK loader + hook ────────────────────────────────
 function usePaystack() {
@@ -1298,7 +1359,7 @@ function PaystackCheckout({ total, cart, goTo, userEmail, orderId, C }) {
           // 1. Verify on server
           await verify(reference);
           // 2. Save order to Supabase
-          await sbDB.insert("orders", {
+          const orderRecord = {
             id: oid,
             user_id: user?.id || "guest",
             items: JSON.stringify(cart?.map(i => ({ id: i.id, name: i.name, emoji: i.emoji, price: i.price, qty: i.qty })) || []),
@@ -1306,10 +1367,38 @@ function PaystackCheckout({ total, cart, goTo, userEmail, orderId, C }) {
             status: "confirmed",
             payment_ref: reference,
             payment_method: "paystack",
+            store_id: cart?.[0]?.storeId || null,
+            delivery_address: null,
+            shopper_id: null,
+            eta_minutes: 25,
             created_at: new Date().toISOString(),
-          });
-          // 3. Fire in-app push
+            updated_at: new Date().toISOString(),
+          };
+          await sbDB.insert("orders", orderRecord);
+
+          // Save to notifications table for Messages tab
+          await sbDB.insert("notifications", {
+            user_id: user?.id || "guest",
+            title: "Order confirmed! 🎉",
+            body: `₦${total.toLocaleString()} paid · ${cart?.length || 0} item${(cart?.length||0)>1?"s":""}. Tracking your order now.`,
+            type: "order",
+            order_id: oid,
+            read: false,
+            created_at: new Date().toISOString(),
+          }).catch(() => {});
+
+          // Fire in-app push notification
           _pushBus.emit({ title: "Order confirmed! 🎉", body: `₦${total.toLocaleString()} paid. Tracking your order now.`, icon: "✅" });
+
+          // OS / server push
+          if (user?.id) {
+            serverSendPush(user.id, {
+              title: "Order confirmed! 🎉",
+              body: `₦${total.toLocaleString()} paid. Your shopper is being assigned.`,
+              tag: `order-${oid}`,
+              url: "/tracking",
+            });
+          }
         } catch (e) {
           console.warn("Post-payment steps failed (non-blocking):", e.message);
         }
@@ -1826,13 +1915,67 @@ body{font-size:calc(16px * var(--text-scale, 1));}
 `;
 
 // ── DATA ─────────────────────────────────────────────────────
-const STORES = [
-  { id: 1, name: "FoodMart",  emoji: "🛒", cat: "Groceries",  rating: 4.8, reviews: 2134, open: true,  eta: "25–40 min", min: 2000, verified: true,  color: "#FF6B35" },
-  { id: 2, name: "GlowStore", emoji: "💄", cat: "Beauty",     rating: 4.7, reviews: 987,  open: true,  eta: "30–50 min", min: 1500, verified: true,  color: "#FF6B9D" },
-  { id: 3, name: "TechHub",   emoji: "📱", cat: "Electronics",rating: 4.6, reviews: 3201, open: true,  eta: "45–90 min", min: 5000, verified: true,  color: "#5C6BC0" },
-  { id: 4, name: "FreshFarm", emoji: "🌿", cat: "Organic",    rating: 4.9, reviews: 650,  open: false, eta: "60–90 min", min: 1000, verified: false, color: "#43A047" },
-  { id: 5, name: "HomeNest",  emoji: "🛋️", cat: "Home",       rating: 4.5, reviews: 1102, open: true,  eta: "1–2 days",  min: 3000, verified: true,  color: "#8E6BBF" },
+// Demo store data — replaced by real Supabase data when available
+const DEMO_STORES = [
+  { id: 1, name: "FoodMart",  emoji: "🛒", cat: "Groceries",  rating: 4.8, reviews: 1240, eta: "20–35 min", open: true,  color: "#00E087", min: 1500 },
+  { id: 2, name: "GlowStore", emoji: "💄", cat: "Beauty",     rating: 4.7, reviews: 830,  eta: "25–40 min", open: true,  color: "#FF6B9D", min: 2000 },
+  { id: 3, name: "TechHub",   emoji: "📱", cat: "Electronics",rating: 4.6, reviews: 620,  eta: "30–50 min", open: true,  color: "#9B6FFF", min: 3000 },
+  { id: 4, name: "FreshFarm", emoji: "🌿", cat: "Organic",    rating: 4.9, reviews: 410,  eta: "20–30 min", open: true,  color: "#00C853", min: 1000 },
+  { id: 5, name: "HomeNest",  emoji: "🛋️", cat: "Home",       rating: 4.5, reviews: 290,  eta: "35–55 min", open: false, color: "#FF9500", min: 2500 },
 ];
+const STORES = DEMO_STORES; // overridden by useStores() hook at runtime
+
+// Hook that fetches stores from Supabase and falls back to demo data
+function useStores() {
+  const [stores, setStores] = useState(DEMO_STORES);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    setLoading(true);
+    sbDB.select("stores", {
+      filter: "status=eq.active",
+      order: "rating.desc",
+      limit: 50,
+    })
+    .then(rows => {
+      if (rows && rows.length > 0) {
+        setStores(rows.map(r => ({
+          id: r.id,
+          name: r.store_name || r.name,
+          emoji: r.emoji || "🏪",
+          cat: r.category || "General",
+          rating: r.rating || 4.5,
+          reviews: r.review_count || 0,
+          eta: r.eta || "20–40 min",
+          open: r.is_open !== false,
+          color: r.color || "#FF4D1A",
+          min: r.min_order || 1000,
+          image: r.logo_url || null,
+          banner: r.banner_url || null,
+          area: r.area || "",
+          description: r.description || "",
+          whatsapp: r.whatsapp || "",
+        })));
+      }
+      setLoading(false);
+    })
+    .catch(() => setLoading(false));
+
+    // Real-time store updates (availability changes)
+    const sub = sbRealtime.subscribe("stores", "status=eq.active", (payload) => {
+      if (payload.eventType === "UPDATE" && payload.new) {
+        setStores(prev => prev.map(s => s.id === payload.new.id
+          ? { ...s, open: payload.new.is_open, rating: payload.new.rating }
+          : s
+        ));
+      }
+    });
+    return () => sbRealtime.unsubscribe(sub);
+  }, []);
+
+  return { stores, loading };
+}
+
 
 const PRODUCTS = {
   1: [{ id: 101, name: "Fresh Tomatoes 1kg",  price: 800,  emoji: "🍅" }, { id: 102, name: "Basmati Rice 5kg", price: 3200, emoji: "🍚" }, { id: 103, name: "Free-range Eggs ×12", price: 1800, emoji: "🥚" }, { id: 104, name: "Chicken Breast 1kg", price: 2800, emoji: "🍗" }],
@@ -1948,6 +2091,7 @@ function Home({ goTo, cart, addToCart, C, dark, toggleDark }) {
   const notifBadge = useNotifBadge();
   const { cityData } = useCity();
   const loc = useRealTimeLocation();
+  const { stores: liveStores } = useStores();
   const toast = useToast();
   const revealRef = useScrollReveal();
   const cartCount = cart.reduce((s, i) => s + i.qty, 0);
@@ -2077,7 +2221,7 @@ function Home({ goTo, cart, addToCart, C, dark, toggleDark }) {
           <span onClick={() => goTo("stores")} style={{ color: C.accent, fontSize: 13, fontWeight: 500, cursor: "pointer" }}>See all →</span>
         </div>
         <div className="hrow">
-          {STORES.filter(s => s.open).map((s, i) => (
+          {liveStores.filter(s => s.open).map((s, i) => (
             <div key={s.id} onClick={() => goTo("stores")} className="reveal tap" style={{ flexShrink: 0, width: 138, background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: "16px 12px", textAlign: "center", cursor: "pointer", transitionDelay: `${i * 40}ms`, transition: "transform 280ms cubic-bezier(.34,1.56,.64,1)" }}>
               <div style={{ width: 48, height: 48, borderRadius: 15, background: `${s.color}18`, border: `1px solid ${s.color}30`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26, margin: "0 auto 8px" }}>{s.emoji}</div>
               <div style={{ fontWeight: 600, fontSize: 13, color: C.text, marginBottom: 2 }}>{s.name}</div>
@@ -2541,9 +2685,14 @@ function ShopperChat({ shopper, onBack, C }) {
 
 // ── TRACKING ─────────────────────────────────────────────────
 function Tracking({ goTo, C }) {
-  const { status: liveStatus } = useTracking("demo_order_001");
+  const { user } = useAuth() || {};
+  const { orders } = useOrders(user?.id);
+  // Track the most recent active order
+  const activeOrder = orders.find(o => !["delivered","cancelled"].includes(o.status)) || orders[0];
+  const { status: liveStatus, statusIndex, progress, eta, STATUSES } = useTracking(activeOrder?.id || "demo_order_001");
   const userLoc = useRealTimeLocation();
-  const [step, setStep] = useState(2);
+  const [step, setStep] = useState(statusIndex >= 0 ? statusIndex : 2);
+  useEffect(() => { if (statusIndex >= 0) setStep(statusIndex); }, [statusIndex]);
   const steps = [
     { label: "Placed",     icon: "receipt", time: "2:30 PM"      },
     { label: "Confirmed",  icon: "check",   time: "2:35 PM"      },
@@ -2655,10 +2804,21 @@ function Tracking({ goTo, C }) {
 // ── CART ─────────────────────────────────────────────────────
 function Cart({ goTo, cart, setCart, addToCart, C }) {
   const toast = useToast();
+  const { user } = useAuth() || {};
   const [coupon, setCoupon] = useState("");
   const [discount, setDiscount] = useState(null);
   const [method, setMethod] = useState("wallet");
   const [done, setDone] = useState(false);
+  const [address, setAddress] = useState("");
+  const [walletBal, setWalletBal] = useState(0);
+
+  // Load wallet balance for display
+  React.useEffect(() => {
+    if (!user?.id) return;
+    sbDB.select("profiles", { filter: `id=eq.${user.id}`, limit: 1 })
+      .then(rows => { if (rows?.[0]?.wallet_balance) setWalletBal(rows[0].wallet_balance); })
+      .catch(() => {});
+  }, [user?.id]);
   const [confettiKey, setConfettiKey] = useState(0);
 
   const sub = cart.reduce((s, i) => s + i.price * i.qty, 0);
@@ -2803,65 +2963,208 @@ function Cart({ goTo, cart, setCart, addToCart, C }) {
 
 // ── WALLET ────────────────────────────────────────────────────
 function Wallet({ goTo, C }) {
-  const toast = useToast();
-  const [action, setAction] = useState(null);
-  const [amount, setAmount] = useState("");
+  const { user } = useAuth() || {};
+  const toast    = useToast();
+  const { initPay } = usePaystack();
+  const [balance, setBalance]   = useState(0);
+  const [txns, setTxns]         = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [topupAmt, setTopupAmt] = useState("");
+  const [showTopup, setShowTopup] = useState(false);
+  const [topping, setTopping]   = useState(false);
+
+  const QUICK_AMTS = [1000, 2000, 5000, 10000, 20000, 50000];
+
+  const loadWallet = async () => {
+    if (!user?.id) { setLoading(false); return; }
+    try {
+      const [profileRows, txnRows] = await Promise.all([
+        sbDB.select("profiles", { filter: `id=eq.${user.id}`, limit: 1 }),
+        sbDB.select("wallet_transactions", { filter: `user_id=eq.${user.id}`, order: "created_at.desc", limit: 30 }),
+      ]);
+      const p = profileRows?.[0];
+      setBalance(p?.wallet_balance || 0);
+      setTxns(txnRows?.length ? txnRows : DEMO_TXNS);
+    } catch { setTxns(DEMO_TXNS); }
+    setLoading(false);
+  };
+
+  useEffect(() => { loadWallet(); }, [user?.id]);
+
+  // Real-time balance updates
+  useEffect(() => {
+    if (!user?.id) return;
+    const sub = sbRealtime.subscribe("profiles", `id=eq.${user.id}`, (payload) => {
+      if (payload.new?.wallet_balance !== undefined) setBalance(payload.new.wallet_balance);
+    });
+    return () => sbRealtime.unsubscribe(sub);
+  }, [user?.id]);
+
+  const DEMO_TXNS = [
+    { id: 1, label: "FoodMart Order",  amount: -3200, created_at: new Date(Date.now()-3600000).toISOString(),  type: "debit",  icon: "🛒" },
+    { id: 2, label: "Wallet Top-up",   amount: 10000, created_at: new Date(Date.now()-86400000).toISOString(), type: "credit", icon: "💳" },
+    { id: 3, label: "Referral Bonus",  amount: 500,   created_at: new Date(Date.now()-172800000).toISOString(),type: "credit", icon: "🎁" },
+    { id: 4, label: "GlowStore Order", amount: -9900, created_at: new Date(Date.now()-259200000).toISOString(),type: "debit",  icon: "💄" },
+    { id: 5, label: "Cashback Reward", amount: 320,   created_at: new Date(Date.now()-345600000).toISOString(),type: "credit", icon: "💰" },
+  ];
+
+  const handleTopUp = () => {
+    const amt = parseInt(topupAmt);
+    if (!amt || amt < 100) { toast("Minimum top-up is ₦100", "error"); return; }
+    setTopping(true);
+    initPay({
+      email: user?.email || "wallet@errand.ng",
+      amount: amt,
+      orderId: `WALLET_${Date.now()}`,
+      metadata: { type: "wallet_topup", user_id: user?.id },
+      onSuccess: async (ref) => {
+        try {
+          // Credit wallet in Supabase
+          await sbDB.insert("wallet_transactions", {
+            user_id:    user.id,
+            amount:     amt,
+            label:      "Wallet Top-up",
+            type:       "credit",
+            payment_ref: ref,
+            icon:       "💳",
+            created_at: new Date().toISOString(),
+          });
+          // Update profile balance
+          await sbDB.update("profiles", { wallet_balance: balance + amt }, `id=eq.${user.id}`);
+          setBalance(b => b + amt);
+          setTxns(prev => [{ id: Date.now(), label: "Wallet Top-up", amount: amt, type: "credit", icon: "💳", created_at: new Date().toISOString() }, ...prev]);
+          toast(`₦${amt.toLocaleString()} added to wallet!`, "success");
+          setShowTopup(false);
+          setTopupAmt("");
+        } catch (e) { toast("Top-up recorded but balance update failed", "error"); }
+        setTopping(false);
+      },
+      onClose: () => setTopping(false),
+    });
+  };
+
+  const timeAgo = (ts) => {
+    const d = new Date(ts); const now = new Date();
+    const diff = now - d;
+    if (diff < 3600000) return `${Math.floor(diff/60000)}m ago`;
+    if (diff < 86400000) return `${Math.floor(diff/3600000)}h ago`;
+    return d.toLocaleDateString("en-NG", { day: "numeric", month: "short" });
+  };
 
   return (
-    <div className="screen" style={{ background: C.bg, paddingBottom: 80 }}>
-      <div style={{ padding: "52px 20px 16px", display: "flex", gap: 12, alignItems: "center" }}>
-        <Back onClick={() => goTo("profile")} C={C} />
-        <div className="disp" style={{ fontSize: 26, color: C.text, letterSpacing: "-0.04em" }}>Wallet</div>
+    <div className="screen" style={{ background: C.bg, paddingBottom: 100 }}>
+      {/* Header */}
+      <div style={{ padding: "52px 20px 0", display: "flex", gap: 12, alignItems: "center", marginBottom: 24 }}>
+        <Back onClick={() => goTo("home")} C={C} />
+        <div className="disp" style={{ fontSize: 24, color: C.text, letterSpacing: "-0.04em" }}>Wallet</div>
       </div>
 
       {/* Balance card */}
-      <div style={{ margin: "0 20px 18px", background: `linear-gradient(145deg, ${C.accent} 0%, #FF9500 60%, #FFB800 100%)`, borderRadius: 22, padding: "26px 22px 22px", position: "relative", overflow: "hidden", boxShadow: `0 16px 48px ${C.accentGlow}, 0 2px 0 rgba(255,255,255,.2) inset`, backdropFilter: "blur(2px)" }}>
-        <div style={{ position: "absolute", top: -28, right: -28, width: 110, height: 110, borderRadius: "50%", background: "rgba(255,255,255,.07)" }} />
-        <div style={{ position: "absolute", bottom: -22, left: -22, width: 80, height: 80, borderRadius: "50%", background: "rgba(255,255,255,.05)" }} />
-        <div style={{ color: "rgba(255,255,255,.7)", fontSize: 12, marginBottom: 7, fontWeight: 500 }}>Available Balance</div>
-        <div className="disp mono" style={{ fontSize: 36, color: "#fff", marginBottom: 20, letterSpacing: "-1px" }}>₦24,500</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          {[["topup","+ Top up"],["transfer","↗ Send"],["withdraw","⬇ Withdraw"],["methods","💳 Cards"]].map(([id, l]) => (
-            <button key={id} onClick={() => { if(id==="methods"){goTo("payments");return;} setAction(action===id?null:id); }} style={{ flex: 1, padding: "9px 4px", background: action === id ? "rgba(255,255,255,.3)" : "rgba(255,255,255,.15)", border: `1px solid rgba(255,255,255,.2)`, borderRadius: 10, color: "#fff", cursor: "pointer", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 600, fontSize: 12, transition: "all .18s" }}>{l}</button>
-          ))}
+      <div style={{ margin: "0 20px 24px", background: `linear-gradient(135deg,${C.accent},#FF9500)`, borderRadius: 22, padding: "24px 22px", boxShadow: `0 12px 40px ${C.accentGlow}`, position: "relative", overflow: "hidden" }}>
+        <div style={{ position: "absolute", top: -30, right: -30, width: 140, height: 140, borderRadius: "50%", background: "rgba(255,255,255,.1)" }} />
+        <div style={{ position: "absolute", bottom: -40, right: 40, width: 100, height: 100, borderRadius: "50%", background: "rgba(255,255,255,.07)" }} />
+        <div style={{ color: "rgba(255,255,255,.8)", fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Available Balance</div>
+        <div className="disp" style={{ fontSize: 38, color: "#fff", letterSpacing: "-0.04em", marginBottom: 20 }}>
+          {loading ? "—" : `₦${(balance / 100).toLocaleString()}`}
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={() => setShowTopup(true)}
+            style={{ flex: 1, height: 44, background: "rgba(255,255,255,.2)", border: "1.5px solid rgba(255,255,255,.35)", borderRadius: 12, color: "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 14, cursor: "pointer", backdropFilter: "blur(8px)" }}>
+            + Top Up
+          </button>
+          <button onClick={() => goTo("payments")}
+            style={{ flex: 1, height: 44, background: "rgba(255,255,255,.2)", border: "1.5px solid rgba(255,255,255,.35)", borderRadius: 12, color: "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 14, cursor: "pointer", backdropFilter: "blur(8px)" }}>
+            Withdraw
+          </button>
         </div>
       </div>
 
-      {/* Action panel */}
-      {action && (
-        <div style={{ margin: "0 20px 16px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: 16, animation: "up .25s ease" }}>
-          <div className="disp" style={{ fontSize: 16, color: C.text, marginBottom: 13 }}>{action === "topup" ? "Top up" : action === "transfer" ? "Send money" : "Withdraw"}</div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 13 }}>
-            {[1000, 2000, 5000, 10000].map(a => (
-              <button key={a} onClick={() => setAmount(String(a))} style={{ padding: "7px 14px", borderRadius: 9, border: `1.5px solid ${String(amount) === String(a) ? C.accent : C.border}`, background: String(amount) === String(a) ? C.accentBg : "transparent", color: String(amount) === String(a) ? C.accent : C.sub, cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "Satoshi,system-ui,sans-serif" }}>₦{a.toLocaleString()}</button>
+      {/* Top-up sheet */}
+      {showTopup && (
+        <div style={{ margin: "0 20px 24px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 20, padding: "20px 18px", animation: "up .25s ease" }}>
+          <div style={{ fontWeight: 700, fontSize: 16, color: C.text, marginBottom: 16 }}>Top Up Wallet</div>
+          {/* Quick amounts */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+            {QUICK_AMTS.map(a => (
+              <button key={a} onClick={() => setTopupAmt(String(a))}
+                style={{ padding: "8px 16px", borderRadius: 10, border: `1.5px solid ${topupAmt === String(a) ? C.accent : C.border}`, background: topupAmt === String(a) ? C.accentBg : "transparent", color: topupAmt === String(a) ? C.accent : C.sub, fontFamily: "Satoshi,sans-serif", fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
+                ₦{a.toLocaleString()}
+              </button>
             ))}
           </div>
-          <Input C={C} placeholder="Custom amount" value={amount} onChange={e => setAmount(e.target.value)} style={{ marginBottom: 13 }} />
-          <Btn C={C} block onClick={() => { toast(`${action === "topup" ? "Topped up" : action === "transfer" ? "Sent" : "Withdrawal initiated"} ₦${Number(amount || 0).toLocaleString()}`, "✓", "success"); setAction(null); setAmount(""); }}>Confirm</Btn>
+          {/* Custom amount */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 }}>Or enter amount</div>
+            <input value={topupAmt} onChange={e => setTopupAmt(e.target.value.replace(/\D/g, ""))}
+              placeholder="e.g. 15000" type="number"
+              style={{ width: "100%", height: 50, background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 13, padding: "0 14px", color: C.text, fontSize: 16, outline: "none", fontFamily: "Satoshi,sans-serif", boxSizing: "border-box" }} />
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={() => { setShowTopup(false); setTopupAmt(""); }}
+              style={{ flex: 1, height: 48, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, color: C.sub, fontFamily: "Satoshi,sans-serif", fontWeight: 600, fontSize: 15, cursor: "pointer" }}>
+              Cancel
+            </button>
+            <button onClick={handleTopUp} disabled={topping || !topupAmt}
+              style={{ flex: 2, height: 48, background: !topupAmt || topping ? C.border : `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 12, color: !topupAmt || topping ? C.muted : "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 15, cursor: !topupAmt || topping ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+              {topping ? <><span style={{ width: 15, height: 15, border: "2px solid rgba(255,255,255,.3)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />Processing…</> : `Pay ₦${Number(topupAmt||0).toLocaleString()}`}
+            </button>
+          </div>
         </div>
       )}
 
       {/* Transactions */}
       <div style={{ padding: "0 20px" }}>
-        <div className="disp" style={{ fontSize: 16, color: C.text, marginBottom: 14 }}>Transactions</div>
-        {TXNS.map((t, i) => (
-          <div key={i} style={{ display: "flex", alignItems: "center", gap: 13, padding: "12px 0", borderBottom: `1px solid ${C.border}` }}>
-            <div style={{ width: 40, height: 40, borderRadius: 12, background: t.cr ? C.greenBg : C.accentBg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>{t.icon}</div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 500, fontSize: 14, color: C.text }}>{t.label}</div>
-              <div style={{ color: C.muted, fontSize: 12, marginTop: 1 }}>{t.date}</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div className="disp" style={{ fontSize: 17, color: C.text }}>Transactions</div>
+          <span style={{ color: C.muted, fontSize: 13 }}>{txns.length} total</span>
+        </div>
+
+        {loading ? (
+          [1,2,3].map(i => <div key={i} style={{ height: 64, background: C.card, borderRadius: 14, marginBottom: 10, animation: "shimmer 1.4s ease-in-out infinite" }} />)
+        ) : txns.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "40px 20px", color: C.sub }}>No transactions yet</div>
+        ) : txns.map((t, i) => {
+          const isCredit = t.amount > 0 || t.type === "credit";
+          return (
+            <div key={t.id || i} style={{ display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, marginBottom: 10 }}>
+              <div style={{ width: 44, height: 44, borderRadius: 13, background: isCredit ? C.greenBg : C.accentBg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>
+                {t.icon || (isCredit ? "💰" : "🛒")}
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 14, color: C.text }}>{t.label}</div>
+                <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{timeAgo(t.created_at)}</div>
+              </div>
+              <div className="disp" style={{ fontSize: 16, color: isCredit ? C.green : C.accent, letterSpacing: "-0.02em" }}>
+                {isCredit ? "+" : ""}₦{Math.abs(t.amount).toLocaleString()}
+              </div>
             </div>
-            <div className="disp" style={{ fontSize: 14, color: t.cr ? C.green : C.accent }}>{t.cr ? "+" : "−"}₦{Math.abs(t.amount).toLocaleString()}</div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
 }
 
-// ── REWARDS ───────────────────────────────────────────────────
 function Rewards({ goTo, C }) {
   const toast = useToast();
+  const { user } = useAuth() || {};
+  const [points, setPoints]   = useState(0);
+  const [tier, setTier]       = useState("Bronze");
+  const [history, setHistory] = useState([]);
+
+  React.useEffect(() => {
+    if (!user?.id) return;
+    sbDB.select("profiles", { filter: `id=eq.${user.id}`, limit: 1 })
+      .then(rows => {
+        const p = rows?.[0];
+        if (p) {
+          setPoints(p.loyalty_points || 0);
+          setTier(p.loyalty_tier || "Bronze");
+        }
+      }).catch(() => {});
+    sbDB.select("loyalty_history", { filter: `user_id=eq.${user.id}`, order: "created_at.desc", limit: 20 })
+      .then(rows => setHistory(rows || [])).catch(() => {});
+  }, [user?.id]);
   const pts = 3240;
   const perks = [
     { icon: "🛵", title: "Free Delivery",    pts: 500,  ok: true },
@@ -3029,6 +3332,24 @@ function Pass({ goTo, C }) {
 // ── REFERRAL ─────────────────────────────────────────────────
 function Referral({ goTo, C }) {
   const toast = useToast();
+  const { user } = useAuth() || {};
+  const [referralCode, setReferralCode] = React.useState("");
+  const [referrals, setReferrals]       = React.useState([]);
+  const [earnings, setEarnings]         = React.useState(0);
+
+  React.useEffect(() => {
+    if (!user?.id) return;
+    sbDB.select("profiles", { filter: `id=eq.${user.id}`, limit: 1 })
+      .then(rows => {
+        const p = rows?.[0];
+        if (p) {
+          setReferralCode(p.referral_code || user.id.slice(0,8).toUpperCase());
+          setEarnings(p.referral_earnings || 0);
+        }
+      }).catch(() => {});
+    sbDB.select("referrals", { filter: `referrer_id=eq.${user.id}`, order: "created_at.desc", limit: 20 })
+      .then(rows => setReferrals(rows || [])).catch(() => {});
+  }, [user?.id]);
   const [copied, setCopied] = useState(false);
   const code = "ERRAND-JOHN500";
   const refs = [
@@ -3079,41 +3400,158 @@ function Referral({ goTo, C }) {
 
 // ── NOTIFICATIONS ─────────────────────────────────────────────
 function Notifications({ goTo, C }) {
-  const [notifs, setNotifs] = useState([
-    { id: 1, icon: "🛵", text: "Your FoodMart order has been delivered!", time: "Just now", unread: true },
-    { id: 2, icon: "⚡", text: "Flash deal: Earbuds 52% off — 4 left!", time: "20 min", unread: true },
-    { id: 3, icon: "🎁", text: "Referral bonus: +500 pts from Tunde's order", time: "1h", unread: true },
-    { id: 4, icon: "💬", text: "Amara: I'm at Oyingbo market now 📦", time: "2h", unread: false },
-    { id: 5, icon: "🏆", text: "You've reached Gold membership!", time: "Yesterday", unread: false },
-  ]);
-  const unread = notifs.filter(n => n.unread).length;
+  const { user } = useAuth() || {};
+  const toast = useToast();
+  const [notifs, setNotifs]     = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [activeTab, setActiveTab] = useState("all");
+
+  const DEMO_NOTIFS = [
+    { id: 1, icon: "🛵", title: "Order delivered!", body: "Your FoodMart order has been delivered.", time: "Just now",  unread: true,  type: "order"  },
+    { id: 2, icon: "⚡", title: "Flash deal",       body: "Earbuds 52% off — only 4 left!",        time: "20 min",    unread: true,  type: "promo"  },
+    { id: 3, icon: "🎁", title: "Referral bonus",   body: "+500 pts from Tunde's first order.",    time: "1h",        unread: false, type: "reward" },
+    { id: 4, icon: "💬", title: "Message from Amara", body: "I'm at the market now — picking up your items 📦", time: "2h", unread: false, type: "chat" },
+    { id: 5, icon: "🏆", title: "Level up!",        body: "You reached Gold status. Enjoy 2x points!", time: "Yesterday", unread: false, type: "reward" },
+  ];
+
+  // Load from Supabase
+  useEffect(() => {
+    if (!user?.id) { setNotifs(DEMO_NOTIFS); setLoading(false); return; }
+    setLoading(true);
+    sbDB.select("notifications", {
+      filter: `user_id=eq.${user.id}`,
+      order: "created_at.desc",
+      limit: 50,
+    })
+    .then(rows => {
+      setNotifs(rows?.length ? rows : DEMO_NOTIFS);
+      setLoading(false);
+    })
+    .catch(() => { setNotifs(DEMO_NOTIFS); setLoading(false); });
+
+    // Real-time new notifications
+    const sub = sbRealtime.subscribe("notifications", `user_id=eq.${user.id}`, (payload) => {
+      if (payload.eventType === "INSERT" && payload.new) {
+        setNotifs(prev => [payload.new, ...prev]);
+        // Trigger in-app toast
+        _pushBus.emit({ title: payload.new.title, body: payload.new.body, icon: payload.new.icon || "🔔" });
+      }
+    });
+    return () => sbRealtime.unsubscribe(sub);
+  }, [user?.id]);
+
+  const markAllRead = async () => {
+    setNotifs(prev => prev.map(n => ({ ...n, unread: false, read: true })));
+    if (user?.id) {
+      await sbDB.update("notifications", { read: true }, `user_id=eq.${user.id}&read=eq.false`).catch(() => {});
+    }
+    toast("All caught up!", "success");
+  };
+
+  const markRead = async (id) => {
+    setNotifs(prev => prev.map(n => n.id === id ? { ...n, unread: false, read: true } : n));
+    await sbDB.update("notifications", { read: true }, `id=eq.${id}`).catch(() => {});
+  };
+
+  const deleteNotif = async (id) => {
+    setNotifs(prev => prev.filter(n => n.id !== id));
+    await sbDB.delete("notifications", `id=eq.${id}`).catch(() => {});
+  };
+
+  const TABS = ["all", "order", "promo", "chat", "reward"];
+  const filtered = activeTab === "all" ? notifs : notifs.filter(n => n.type === activeTab);
+  const unreadCount = notifs.filter(n => n.unread || !n.read).length;
+
+  const timeAgo = (ts) => {
+    if (!ts) return "";
+    const diff = Date.now() - new Date(ts).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1)  return "Just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24)  return `${hrs}h ago`;
+    return `${Math.floor(hrs/24)}d ago`;
+  };
+
   return (
-    <div className="screen" style={{ background: C.bg, paddingBottom: 80 }}>
-      <div style={{ padding: "56px 20px 16px", display: "flex", gap: 12, alignItems: "center" }}>
-        <Back onClick={() => goTo("home")} C={C} />
-        <div style={{ flex: 1 }}>
-          <div className="disp" style={{ fontSize: 20, color: C.text }}>Notifications</div>
-          {unread > 0 && <div style={{ color: C.sub, fontSize: 12, marginTop: 2 }}>{unread} unread</div>}
+    <div className="screen" style={{ background: C.bg, paddingBottom: 100 }}>
+      {/* Header */}
+      <div style={{ padding: "52px 20px 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div className="disp" style={{ fontSize: 26, color: C.text, letterSpacing: "-0.04em" }}>Messages</div>
+          {unreadCount > 0 && <div style={{ color: C.sub, fontSize: 13, marginTop: 2 }}>{unreadCount} unread</div>}
         </div>
-        {unread > 0 && <button onClick={() => setNotifs(n => n.map(x => ({ ...x, unread: false })))} style={{ color: C.accent, fontSize: 13, background: "none", border: "none", cursor: "pointer", fontWeight: 600, fontFamily: "Satoshi,system-ui,sans-serif" }}>Mark all read</button>}
+        {unreadCount > 0 && (
+          <button onClick={markAllRead} style={{ background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 10, padding: "8px 14px", color: C.accent, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "Satoshi,sans-serif" }}>
+            Mark all read
+          </button>
+        )}
       </div>
+
+      {/* Tabs */}
+      <div className="hrow" style={{ paddingInline: 20, gap: 8, marginBottom: 20 }}>
+        {TABS.map(tab => {
+          const sel = activeTab === tab;
+          const count = tab === "all" ? unreadCount : notifs.filter(n => (n.type === tab) && (n.unread || !n.read)).length;
+          return (
+            <button key={tab} onClick={() => setActiveTab(tab)} style={{ flexShrink: 0, padding: "7px 16px", borderRadius: 100, border: `1.5px solid ${sel ? C.accent : C.border}`, background: sel ? C.accentBg : "transparent", color: sel ? C.accent : C.sub, fontFamily: "Satoshi,sans-serif", fontSize: 13, fontWeight: sel ? 700 : 500, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+              {count > 0 && <span style={{ background: sel ? C.accent : C.border, color: sel ? "#fff" : C.sub, borderRadius: 10, padding: "1px 6px", fontSize: 11, fontWeight: 800 }}>{count}</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* List */}
       <div style={{ padding: "0 20px" }}>
-        {notifs.map(n => (
-          <div key={n.id} onClick={() => setNotifs(ns => ns.map(x => x.id === n.id ? { ...x, unread: false } : x))} className="reveal tap" style={{ display: "flex", gap: 12, padding: "14px 0", borderBottom: `1px solid ${C.border}`, cursor: "pointer" }}>
-            <div style={{ width: 42, height: 42, borderRadius: 12, background: n.unread ? C.accentBg : C.card, border: `1px solid ${n.unread ? C.accentLine : C.border}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>{n.icon}</div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: n.unread ? 600 : 400, fontSize: 14, color: C.text, lineHeight: 1.4 }}>{n.text}</div>
-              <div style={{ color: C.muted, fontSize: 12, marginTop: 4 }}>{n.time}</div>
-            </div>
-            {n.unread && <div style={{ width: 7, height: 7, borderRadius: "50%", background: C.accent, flexShrink: 0, marginTop: 7 }} />}
+        {loading ? (
+          [1,2,3,4].map(i => (
+            <div key={i} style={{ height: 72, background: C.card, borderRadius: 16, marginBottom: 10, animation: "shimmer 1.4s ease-in-out infinite", animationDelay: `${i*0.1}s` }} />
+          ))
+        ) : filtered.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "60px 20px" }}>
+            <div style={{ fontSize: 48, marginBottom: 16 }}>🔔</div>
+            <div className="disp" style={{ fontSize: 20, color: C.text, marginBottom: 8 }}>All caught up!</div>
+            <div style={{ color: C.sub, fontSize: 14 }}>No {activeTab !== "all" ? activeTab : ""} notifications yet.</div>
           </div>
-        ))}
+        ) : (
+          filtered.map((n, i) => {
+            const isUnread = n.unread || !n.read;
+            return (
+              <div key={n.id} onClick={() => {
+                markRead(n.id);
+                if (n.type === "order" && n.order_id) goTo("tracking");
+                if (n.type === "chat")  goTo("order-chat");
+              }}
+                style={{ display: "flex", gap: 14, padding: "14px 16px", background: isUnread ? (C.dark ? "rgba(255,77,26,.06)" : "rgba(255,77,26,.04)") : C.card, border: `1px solid ${isUnread ? C.accentLine : C.border}`, borderRadius: 16, marginBottom: 10, cursor: "pointer", animation: `up .25s ${i*30}ms ease both`, position: "relative", transition: "background .2s" }}>
+                {/* Icon */}
+                <div style={{ width: 46, height: 46, borderRadius: 14, background: C.surface, border: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 }}>
+                  {n.icon || (n.type === "order" ? "🛵" : n.type === "chat" ? "💬" : n.type === "promo" ? "⚡" : "🔔")}
+                </div>
+                {/* Content */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: isUnread ? 700 : 600, fontSize: 14, color: C.text, marginBottom: 3 }}>
+                    {n.title || n.text?.substring(0, 50)}
+                  </div>
+                  <div style={{ color: C.sub, fontSize: 13, lineHeight: 1.5, marginBottom: 4 }}>
+                    {n.body || n.text}
+                  </div>
+                  <div style={{ fontSize: 12, color: C.muted }}>{n.time || timeAgo(n.created_at)}</div>
+                </div>
+                {/* Unread dot */}
+                {isUnread && <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.accent, flexShrink: 0, marginTop: 4 }} />}
+                {/* Delete */}
+                <button onClick={e => { e.stopPropagation(); deleteNotif(n.id); }}
+                  style={{ position: "absolute", top: 10, right: 10, background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 16, opacity: 0.6, padding: 4 }}>×</button>
+              </div>
+            );
+          })
+        )}
       </div>
     </div>
   );
 }
 
-// ── DUAL PROFILE ──────────────────────────────────────────────
 function DualProfile({ goTo, C }) {
   const toast = useToast();
   const [view, setView] = useState("hub");
@@ -3417,96 +3855,251 @@ function DualProfile({ goTo, C }) {
 
 // ── PROFILE ───────────────────────────────────────────────────
 function Profile({ goTo, C, dark, toggleDark }) {
+  const { user, signOut } = useAuth() || {};
   const toast = useToast();
-  const [showDP, setShowDP] = useState(false);
+  const [profile, setProfile]   = useState(null);
+  const [loading, setLoading]   = useState(true);
+  const [editing, setEditing]   = useState(false);
+  const [saving,  setSaving]    = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [form, setForm] = useState({ full_name: "", phone: "", email: "", area: "", state: "" });
+  const [avatar, setAvatar] = useState(null);
+  const setF = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
-  if (showDP) return <DualProfile goTo={goTo} C={C} />;
+  // Load profile from Supabase
+  useEffect(() => {
+    if (!user?.id) { setLoading(false); return; }
+    sbDB.select("profiles", { filter: `id=eq.${user.id}`, limit: 1 })
+      .then(rows => {
+        const p = rows?.[0];
+        if (p) {
+          setProfile(p);
+          setForm({
+            full_name: p.full_name || user.user_metadata?.full_name || "",
+            phone:     p.phone     || user.phone || "",
+            email:     p.email     || user.email || "",
+            area:      p.area      || "",
+            state:     p.state     || "",
+          });
+          if (p.avatar_url) setAvatar(p.avatar_url);
+        } else {
+          // Bootstrap from auth metadata
+          setForm({
+            full_name: user.user_metadata?.full_name || "",
+            phone:     user.phone || "",
+            email:     user.email || "",
+            area: "", state: "",
+          });
+        }
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, [user?.id]);
 
-  const menu = [
-    { section: "Shopping", items: [{ icon: "📦", label: "My Orders", go: "orders" }, { icon: "🧾", label: "Order Receipt", go: "order-receipt" }, { icon: "❤️", label: "Saved Stores" }, { icon: "🔔", label: "Notifications", go: "push-settings" }] },
-    { section: "Finance",  items: [{ icon: "💰", label: "Wallet", go: "wallet" }, { icon: "🏆", label: "Rewards", go: "rewards" }, { icon: "💳", label: "Payment Methods", go: "payments" }] },
-    { section: "Discover", items: [{ icon: "👑", label: "Errand Pass", go: "pass" }, { icon: "👥", label: "Group Buy", go: "groupbuy" }, { icon: "🎁", label: "Refer & Earn", go: "referral" }, { icon: "🏙️", label: "Community Feed", go: "social" }, { icon: "📅", label: "Advanced Ordering", go: "ordering" }] },
-    { section: "Shopper",  items: [{ icon: "🛵", label: "Shopper Hub", go: "shopper-hub" }, { icon: "🛵", label: "Shopper Registration", go: "shopper-onboarding" }, { icon: "🏪", label: "Open a Store", go: "store-onboarding" }, { icon: "⭐", label: "My Ratings", go: "shopper-ratings" }] },
-    { section: "Play & Earn", items: [{ icon: "🎮", label: "Challenges & Spin", go: "gamification" }] },
-    { section: "My Store", items: [{ icon: "🏪", label: "Store Dashboard", go: "store-dashboard" }, { icon: "📦", label: "Product Manager", go: "products" }, { icon: "⚠️", label: "Order Disputes", go: "disputes" }, { icon: "🔧", label: "Business Tools", go: "business" }] },
-    { section: "Account",  items: [{ icon: "✏️", label: "Edit Profile", go: "edit-profile" }, { icon: "⚙️", label: "Settings", go: "settings" }, { icon: "❓", label: "Help & Support", go: "help" }, { icon: "🛡️", label: "Verification Queue", go: "verify-queue" }, { icon: "📊", label: "Analytics", go: "analytics" }, { icon: "💰", label: "Commissions", go: "commissions" }, { icon: "🏷️", label: "Promo Manager", go: "promo-manager" }, { icon: "🚀", label: "Launch Prep", go: "launch-prep" }, { icon: "▲", label: "Deploy Guide", go: "deploy-guide" }, { icon: "🔐", label: "Admin Panel", go: "admin-panel" }, { icon: "📲", label: "Install App", go: "pwa-install" }, { icon: "⭐", label: "Store Reviews", go: "store-reviews" }] },
-    { section: "Location",  items: [{ icon: "🗺️", label: "Store Locator", go: "store-locator" }, { icon: "📍", label: "Address Book", go: "addresses" }] },
-    { section: "Support",   items: [{ icon: "💬", label: "Order Chat", go: "order-chat" }, { icon: "🤖", label: "Live Chat & Support", go: "support" }] },
+  const pickAvatar = () => {
+    const input = document.createElement("input");
+    input.type = "file"; input.accept = "image/*";
+    input.onchange = async (e) => {
+      const file = e.target.files[0]; if (!file) return;
+      if (file.size > 3 * 1024 * 1024) { toast("Image must be under 3MB", "error"); return; }
+      const reader = new FileReader();
+      reader.onload = (r) => setAvatar(r.target.result);
+      reader.readAsDataURL(file);
+    };
+    input.click();
+  };
+
+  const saveProfile = async () => {
+    if (!form.full_name.trim()) { toast("Name is required", "error"); return; }
+    setSaving(true);
+    try {
+      const data = {
+        id:        user.id,
+        full_name: form.full_name.trim(),
+        phone:     form.phone.trim(),
+        email:     form.email.trim() || user.email,
+        area:      form.area.trim(),
+        state:     form.state.trim(),
+        avatar_url: avatar || null,
+        updated_at: new Date().toISOString(),
+      };
+      await sbDB.upsert("profiles", data, "id");
+      setProfile(prev => ({ ...prev, ...data }));
+      setEditing(false);
+      toast("Profile saved!", "success");
+    } catch (e) {
+      toast(e.message || "Save failed", "error");
+    }
+    setSaving(false);
+  };
+
+  const handleSignOut = async () => {
+    setSigningOut(true);
+    try { await signOut?.(); } catch {}
+    setSigningOut(false);
+  };
+
+  const displayName = form.full_name || user?.user_metadata?.full_name || user?.email?.split("@")[0] || "User";
+  const userType    = profile?.user_type || user?.user_metadata?.user_type || "customer";
+  const initials    = displayName.split(" ").map(w => w[0]).join("").toUpperCase().slice(0, 2);
+
+  const MENU_SECTIONS = [
+    { section: "Account", items: [
+      { icon: "user",    label: "Edit Profile",       action: () => setEditing(true) },
+      { icon: "shield",  label: "Verification Status", go: "shopper-onboarding" },
+      { icon: "card",    label: "Payment Methods",     go: "wallet" },
+      { icon: "pin",     label: "Saved Addresses",     go: "addresses" },
+    ]},
+    { section: "Activity", items: [
+      { icon: "orders",  label: "Order History",       go: "orders" },
+      { icon: "trophy",  label: "Rewards & Points",    go: "rewards" },
+      { icon: "gift",    label: "Refer & Earn",         go: "referral" },
+      { icon: "wallet",  label: "Wallet",              go: "wallet" },
+    ]},
+    { section: userType === "shopper" ? "Shopper" : userType === "store" ? "Store" : "Earn with Errand", items:
+      userType === "shopper"
+        ? [{ icon: "bike",  label: "Shopper Dashboard", go: "shopper-hub" },
+           { icon: "chart", label: "Earnings",           go: "shopper-hub" }]
+        : userType === "store"
+        ? [{ icon: "store", label: "Store Dashboard",    go: "store-dashboard" },
+           { icon: "tag",   label: "My Products",        go: "products" }]
+        : [{ icon: "bike",  label: "Shopper Registration", go: "shopper-onboarding" },
+           { icon: "store", label: "Open a Store",         go: "store-onboarding" }]
+    },
+    { section: "Preferences", items: [
+      { icon: "bell",    label: "Notifications",       go: "push-settings" },
+      { icon: "settings",label: "App Settings",        go: "settings" },
+      { icon: dark ? "sun" : "moon", label: dark ? "Light Mode" : "Dark Mode", action: toggleDark },
+    ]},
+    { section: "Support", items: [
+      { icon: "help",    label: "Help & Support",      go: "support" },
+      { icon: "shield",  label: "Privacy Policy",      go: "help" },
+    ]},
   ];
 
-  return (
-    <div className="screen" style={{ background: C.bg, paddingBottom: 80 }}>
-      {/* Hero */}
-      <div style={{ padding: "52px 20px 22px", textAlign: "center", borderBottom: `1px solid ${C.border}` }}>
-        <div style={{ width: 80, height: 80, background: `linear-gradient(145deg, ${C.accent}, #FF9500)`, borderRadius: 26, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 38, margin: "0 auto 18px", boxShadow: `0 12px 40px ${C.accentGlow}, 0 0 0 4px ${C.accentBg}, 0 0 0 7px ${C.accent}22` }}>😊</div>
-        <div className="disp" style={{ fontSize: 26, color: C.text, letterSpacing: "-0.04em", lineHeight: 1.1 }}>John Doe</div>
-        <div style={{ color: C.sub, fontSize: 13, marginTop: 4 }}>@johndoe · Lagos, NG</div>
-        <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: 11 }}>
-          <div style={{ display: "inline-flex", alignItems: "center", gap: 6, background: C.goldBg, border: `1px solid rgba(245,166,35,.22)`, borderRadius: 20, padding: "5px 14px" }}>
-            <span>🏆</span><span style={{ fontWeight: 600, fontSize: 13, color: C.gold }}>Gold · 3,240 pts</span>
+  const inputStyle = { width: "100%", height: 50, background: C.dark ? "rgba(255,255,255,.05)" : "rgba(0,0,0,.04)", border: `1.5px solid ${C.border}`, borderRadius: 13, padding: "0 14px", color: C.text, fontSize: 15, outline: "none", fontFamily: "Satoshi,sans-serif", boxSizing: "border-box" };
+
+  // ── Edit sheet ───────────────────────────────────────────
+  if (editing) return (
+    <div className="screen" style={{ background: C.bg, paddingBottom: 100 }}>
+      <div style={{ padding: "52px 20px 20px", display: "flex", gap: 12, alignItems: "center" }}>
+        <Back onClick={() => setEditing(false)} C={C} />
+        <div className="disp" style={{ fontSize: 22, color: C.text }}>Edit Profile</div>
+      </div>
+
+      <div style={{ padding: "0 20px", display: "flex", flexDirection: "column", gap: 16 }}>
+        {/* Avatar */}
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12, marginBottom: 8 }}>
+          <div onClick={pickAvatar} style={{ width: 88, height: 88, borderRadius: 26, background: avatar ? "transparent" : `linear-gradient(135deg,${C.accent},#FF9500)`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", position: "relative", overflow: "hidden", boxShadow: `0 8px 28px ${C.accentGlow}` }}>
+            {avatar
+              ? <img src={avatar} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              : <span style={{ fontSize: 28, fontWeight: 800, color: "#fff" }}>{initials}</span>}
+            <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.35)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Icon name="camera" size={22} color="#fff" />
+            </div>
           </div>
-          <div onClick={() => goTo("settings")} style={{ display: "inline-flex", alignItems: "center", gap: 6, background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 20, padding: "5px 12px", cursor: "pointer" }}>
-            <span style={{ fontSize: 12 }}>🎨</span><span style={{ fontWeight: 600, fontSize: 12, color: C.accent }}>Theme</span>
-          </div>
+          <span style={{ color: C.accent, fontSize: 13, fontWeight: 600, cursor: "pointer" }} onClick={pickAvatar}>Change photo</span>
         </div>
-        <div style={{ display: "flex", paddingTop: 18, marginTop: 4 }}>
-          {[["Orders","34"],["Saved","12"],["Referrals","3"],["Rating","4.9★"]].map(([l,v]) => (
-            <div key={l} onClick={() => l === "Orders" ? goTo("orders") : null} style={{ flex: 1, textAlign: "center", cursor: l === "Orders" ? "pointer" : "default" }}>
-              <div className="disp" style={{ fontSize: 17, color: C.text }}>{v}</div>
-              <div style={{ color: C.sub, fontSize: 12, marginTop: 2 }}>{l}</div>
+
+        {[
+          { key: "full_name", label: "Full Name",    placeholder: "John Doe",           type: "text" },
+          { key: "phone",     label: "Phone Number", placeholder: "+234 800 000 0000",   type: "tel" },
+          { key: "email",     label: "Email",        placeholder: "your@email.com",      type: "email" },
+          { key: "area",      label: "Area",         placeholder: "e.g. Victoria Island",type: "text" },
+          { key: "state",     label: "State",        placeholder: "e.g. Lagos",          type: "text" },
+        ].map(f => (
+          <div key={f.key}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 7, textTransform: "uppercase", letterSpacing: 1 }}>{f.label}</div>
+            <input value={form[f.key]} onChange={e => setF(f.key, e.target.value)}
+              type={f.type} placeholder={f.placeholder} style={inputStyle} />
+          </div>
+        ))}
+      </div>
+
+      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, padding: "14px 20px max(env(safe-area-inset-bottom,16px),16px)", background: C.bg, borderTop: `1px solid ${C.border}` }}>
+        <button onClick={saveProfile} disabled={saving}
+          style={{ width: "100%", height: 54, background: saving ? C.border : `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 14, color: saving ? C.muted : "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 16, cursor: saving ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, boxShadow: saving ? "none" : `0 6px 24px ${C.accentGlow}` }}>
+          {saving ? <><span style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,.3)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />Saving…</> : "Save Changes"}
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="screen" style={{ background: C.bg, paddingBottom: 100 }}>
+      {/* Header */}
+      <div style={{ padding: "52px 20px 24px" }}>
+        {/* Avatar + name */}
+        <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 20 }}>
+          <div onClick={() => setEditing(true)} style={{ width: 68, height: 68, borderRadius: 21, background: avatar ? "transparent" : `linear-gradient(135deg,${C.accent},#FF9500)`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", overflow: "hidden", boxShadow: `0 6px 20px ${C.accentGlow}`, flexShrink: 0 }}>
+            {avatar
+              ? <img src={avatar} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              : <span style={{ fontSize: 22, fontWeight: 800, color: "#fff" }}>{initials}</span>}
+          </div>
+          <div style={{ flex: 1 }}>
+            <div className="disp" style={{ fontSize: 22, color: C.text, letterSpacing: "-0.03em", lineHeight: 1.2 }}>
+              {loading ? "Loading…" : displayName}
+            </div>
+            <div style={{ color: C.sub, fontSize: 13, marginTop: 3 }}>{form.email || user?.email}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+              <div style={{ background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 8, padding: "3px 10px", fontSize: 12, fontWeight: 700, color: C.accent }}>
+                {userType === "shopper" ? "🛵 Shopper" : userType === "store" ? "🏪 Store" : "🛒 Customer"}
+              </div>
+              {profile?.verified && <div style={{ background: C.greenBg, border: `1px solid ${C.green}33`, borderRadius: 8, padding: "3px 10px", fontSize: 12, fontWeight: 700, color: C.green }}>✓ Verified</div>}
+            </div>
+          </div>
+          <button onClick={() => setEditing(true)} style={{ width: 40, height: 40, borderRadius: 12, background: C.card, border: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+            <Icon name="settings" size={18} color={C.sub} />
+          </button>
+        </div>
+
+        {/* Stats row */}
+        <div style={{ display: "flex", gap: 10 }}>
+          {[
+            { label: "Orders",  value: profile?.order_count  || "0" },
+            { label: "Points",  value: (profile?.loyalty_points || 0).toLocaleString() },
+            { label: "Wallet",  value: `₦${((profile?.wallet_balance || 0) / 100).toLocaleString()}` },
+          ].map(s => (
+            <div key={s.label} style={{ flex: 1, background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 0", textAlign: "center" }}>
+              <div className="disp" style={{ fontSize: 18, color: C.text, letterSpacing: "-0.03em" }}>{s.value}</div>
+              <div style={{ color: C.muted, fontSize: 12, marginTop: 2 }}>{s.label}</div>
             </div>
           ))}
         </div>
       </div>
 
-      {/* Earn banner */}
-      <div onClick={() => setShowDP(true)} style={{ margin: "14px 20px", background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}>
-        <div style={{ display: "flex" }}>
-          {["🧑‍💼","🏪"].map((e, i) => <div key={i} style={{ width: 36, height: 36, borderRadius: 11, background: C.card, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, marginLeft: i > 0 ? -8 : 0 }}>{e}</div>)}
-        </div>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontWeight: 600, fontSize: 14, color: C.text }}>Earn on Errand</div>
-          <div style={{ color: C.sub, fontSize: 12, marginTop: 1 }}>Register as shopper or store owner</div>
-        </div>
-        <span style={{ color: C.accent, fontSize: 16 }}>›</span>
-      </div>
-
-      <div style={{ padding: "0 20px" }}>
-        {/* Dark mode */}
-        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 13, padding: "13px 16px", display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
-          <span style={{ fontSize: 18 }}>{dark ? "🌙" : "☀️"}</span>
-          <span style={{ flex: 1, fontWeight: 500, fontSize: 14, color: C.text }}>{dark ? "Dark Mode" : "Light Mode"}</span>
-          <ToggleSwitch on={dark} onChange={toggleDark} C={C} />
-        </div>
-
-        {/* Menu */}
-        {menu.map((sec, si) => (
-          <div key={si} style={{ marginBottom: 18 }}>
-            <div style={{ color: C.muted, fontSize: 12, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>{sec.section}</div>
-            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, overflow: "hidden" }}>
-              {sec.items.map((item, ii) => (
-                <div key={ii} onClick={() => item.go ? goTo(item.go) : toast(`${item.label} coming soon`, "🔧")} style={{ display: "flex", alignItems: "center", gap: 13, padding: "13px 16px", borderBottom: ii < sec.items.length - 1 ? `1px solid ${C.border}` : "none", cursor: "pointer" }}>
-                  <span style={{ fontSize: 18, width: 24, textAlign: "center" }}>{item.icon}</span>
-                  <span style={{ flex: 1, fontWeight: 500, fontSize: 14, color: C.text }}>{item.label}</span>
-                  <span style={{ color: C.muted, fontSize: 16 }}>›</span>
+      {/* Menu sections */}
+      <div style={{ padding: "0 20px", display: "flex", flexDirection: "column", gap: 20 }}>
+        {MENU_SECTIONS.map(sec => (
+          <div key={sec.section}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: C.muted, letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 10 }}>{sec.section}</div>
+            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, overflow: "hidden" }}>
+              {sec.items.map((item, i) => (
+                <div key={item.label} onClick={() => item.action ? item.action() : goTo(item.go)}
+                  style={{ display: "flex", alignItems: "center", gap: 13, padding: "15px 16px", borderBottom: i < sec.items.length - 1 ? `1px solid ${C.border}` : "none", cursor: "pointer" }}
+                  className="tap">
+                  <div style={{ width: 36, height: 36, borderRadius: 11, background: C.surface, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    <Icon name={item.icon} size={18} color={C.accent} />
+                  </div>
+                  <span style={{ flex: 1, fontSize: 15, fontWeight: 500, color: C.text }}>{item.label}</span>
+                  <Icon name="chevronR" size={16} color={C.muted} />
                 </div>
               ))}
             </div>
           </div>
         ))}
 
-        <button style={{ width: "100%", padding: "13px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 13, color: "#EF4444", cursor: "pointer", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 600, fontSize: 14.5, marginBottom: 24 }}>Sign out</button>
+        {/* Sign out */}
+        <button onClick={handleSignOut} disabled={signingOut}
+          style={{ width: "100%", height: 52, background: "rgba(239,68,68,.08)", border: "1.5px solid rgba(239,68,68,.2)", borderRadius: 14, color: "#EF4444", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 15, cursor: signingOut ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 20 }}>
+          {signingOut ? "Signing out…" : "Sign Out"}
+        </button>
+        <div style={{ textAlign: "center", color: C.muted, fontSize: 12, paddingBottom: 20 }}>Errand v3.0 · Lagos, Nigeria 🇳🇬</div>
       </div>
     </div>
   );
 }
 
-
-// ─────────────────────────────────────────────────────────────
-//  NEW SCREENS: Onboarding · Order History · Settings · Help
-// ─────────────────────────────────────────────────────────────
-
-// ── ONBOARDING ───────────────────────────────────────────────
 function Onboarding({ onDone, C }) {
   // Onboarding is now handled inside AuthScreen (5-step flow)
   // This is kept for backward compatibility — just call onDone
@@ -3525,31 +4118,41 @@ const ORDER_HISTORY = [
 ];
 
 function OrderHistory({ goTo, addToCart, C }) {
-  const toast = useToast();
-  const [section, setSection] = useState("active"); // active | completed
-  const [activeFilter, setActiveFilter] = useState("all");
+  const toast  = useToast();
+  const { user } = useAuth() || {};
+  const { orders: rawOrders, loading: ordersLoading } = useOrders(user?.id);
+  const [section, setSection]             = useState("active");
+  const [activeFilter, setActiveFilter]   = useState("all");
   const [completedFilter, setCompletedFilter] = useState("all");
-  const [expanded, setExpanded] = useState(null);
-  const [rating, setRating] = useState({});
-  const [ratingDone, setRatingDone] = useState({});
+  const [expanded, setExpanded]           = useState(null);
+  const [rating, setRating]               = useState({});
+  const [ratingDone, setRatingDone]       = useState({});
 
-  // Augmented order history with payment status
-  const ALL_ORDERS = [
+  // Demo orders shown when not signed in or Supabase returns nothing
+  const DEMO_ORDERS = [
     { id: "ERR-0893", store: "FoodMart",  icon: "store", date: "Today, 2:30 PM",   status: "delivered", payStatus: "paid",    total: 6200,  items: ["Fresh Tomatoes 1kg","Basmati Rice 5kg","Free-range Eggs ×12"], rating: null },
     { id: "ERR-0891", store: "TechHub",   icon: "zap",   date: "Today, 11:00 AM",  status: "on_the_way",payStatus: "paid",    total: 9800,  items: ["USB-C Fast Charger"], rating: null },
-    { id: "ERR-0889", store: "GlowStore", icon: "heart", date: "Yesterday",         status: "confirmed", payStatus: "unpaid",  total: 4200,  items: ["Matte Lipstick Set"], rating: null },
-    { id: "ERR-0885", store: "FreshFarm", icon: "store", date: "Yesterday",         status: "confirmed", payStatus: "unpaid",  total: 2800,  items: ["Organic Veggies"], rating: null },
-    { id: "ERR-0880", store: "HomeNest",  icon: "store", date: "Feb 22",            status: "confirmed", payStatus: "appeal",  total: 6800,  items: ["Desk Lamp LED"], rating: null },
     { id: "ERR-0871", store: "GlowStore", icon: "heart", date: "Feb 20, 4:15 PM",  status: "delivered", payStatus: "paid",    total: 9900,  items: ["Vitamin C Serum","Matte Lipstick Set"], rating: 5 },
     { id: "ERR-0854", store: "TechHub",   icon: "zap",   date: "Feb 17, 11:00 AM", status: "delivered", payStatus: "paid",    total: 26000, items: ["Wireless Earbuds","USB-C Fast Charger"], rating: 4 },
-    { id: "ERR-0812", store: "FoodMart",  icon: "store", date: "Feb 12, 6:20 PM",  status: "cancelled", payStatus: "refunded",total: 4800,  items: ["Chicken Breast 1kg","Basmati Rice 5kg"], rating: null },
-    { id: "ERR-0790", store: "HomeNest",  icon: "store", date: "Feb 8, 1:45 PM",   status: "delivered", payStatus: "paid",    total: 11300, items: ["Throw Pillows ×2","Desk Lamp LED"], rating: 4 },
   ];
 
-  const ACTIVE_STATUSES = ["confirmed","on_the_way","shopping","pending"];
+  // Map Supabase rows to display format
+  const ALL_ORDERS = rawOrders.length > 0 ? rawOrders.map(o => ({
+    id: o.id,
+    store: o.store_name || o.store_id || "Store",
+    icon: "store",
+    date: new Date(o.created_at).toLocaleString("en-NG", { dateStyle: "medium", timeStyle: "short" }),
+    status: o.status || "pending",
+    payStatus: o.payment_ref ? "paid" : "unpaid",
+    total: o.total || 0,
+    items: o.items ? (typeof o.items === "string" ? JSON.parse(o.items) : o.items).map(i => i.name || i) : [],
+    rating: o.rating || null,
+  })) : DEMO_ORDERS;
+
+  const ACTIVE_STATUSES    = ["confirmed","on_the_way","shopping","pending","preparing","assigned","picked_up"];
   const COMPLETED_STATUSES = ["delivered","cancelled"];
 
-  const activeOrders = ALL_ORDERS.filter(o => ACTIVE_STATUSES.includes(o.status));
+  const activeOrders    = ALL_ORDERS.filter(o => ACTIVE_STATUSES.includes(o.status));
   const completedOrders = ALL_ORDERS.filter(o => COMPLETED_STATUSES.includes(o.status));
 
   const filterActive = (orders) => {
@@ -3750,7 +4353,23 @@ function SignOutButton({ C }) {
 
 function Settings({ goTo, dark, toggleDark, C }) {
   const toast = useToast();
+  const { user } = useAuth() || {};
   const [notifs, setNotifs] = useState({ orders: true, deals: true, promos: false, shopper: true, system: true });
+
+  // Load + save preferences to Supabase
+  React.useEffect(() => {
+    if (!user?.id) return;
+    sbDB.select("profiles", { filter: `id=eq.${user.id}`, limit: 1 })
+      .then(rows => {
+        const prefs = rows?.[0]?.preferences;
+        if (prefs) try { setNotifs(prev => ({ ...prev, ...JSON.parse(prefs) })); } catch {}
+      }).catch(() => {});
+  }, [user?.id]);
+
+  const savePrefs = async (newNotifs) => {
+    if (!user?.id) return;
+    await sbDB.update("profiles", { preferences: JSON.stringify(newNotifs) }, `id=eq.${user.id}`).catch(() => {});
+  };
   const [privacy, setPrivacy] = useState({ location: true, analytics: false, personalised: true });
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState("John Doe");
@@ -4262,7 +4881,8 @@ function LiveMapCanvas({ shopperPos, customerPos, eta, step, C }) {
 // ── LiveTracking: full tracking screen with realtime map ─────
 function LiveTracking({ goTo, orderId = "demo_order_001", C }) {
   const { status: liveStatus } = useTracking(orderId);
-  const [step, setStep] = useState(2);
+  const [step, setStep] = useState(statusIndex >= 0 ? statusIndex : 2);
+  useEffect(() => { if (statusIndex >= 0) setStep(statusIndex); }, [statusIndex]);
   const [eta, setEta] = useState("18 min");
   const [expanded, setExpanded] = useState(false);
   const { pos: customerPos, request: requestCustomerLoc } = useCustomerLocation();
@@ -5018,120 +5638,211 @@ const useShopperMode = () => React.useContext(ShopperModeContext);
 
 // ── ShopperDashboard ──────────────────────────────────────────
 function ShopperDashboard({ goTo, C }) {
-  const { shopperStatus, setShopperStatus } = useShopperMode() || {};
-  const toast = useToast();
-  const [activeTab, setActiveTab] = useState("incoming");
+  const { user }  = useAuth() || {};
+  const toast     = useToast();
+  const { isShopperMode, setIsShopperMode } = useShopperMode() || {};
+  const [tab, setTab]             = useState("incoming");
+  const [incoming, setIncoming]   = useState([]);
+  const [active, setActive]       = useState(null);
+  const [history, setHistory]     = useState([]);
+  const [earnings, setEarnings]   = useState({ today: 0, week: 0, total: 0, pending: 0 });
+  const [loading, setLoading]     = useState(true);
+  const [online, setOnline]       = useState(false);
+  const [accepting, setAccepting] = useState(null);
 
-  const INCOMING = [
-    { id: "ORD-1021", store: "FoodMart VI", customer: "Funke A.", items: 6, total: 14200, distance: "1.2 km", tip: 500, urgency: "normal", time: "3 min ago" },
-    { id: "ORD-1022", store: "GlowStore",   customer: "Bola M.", items: 3, total: 8700,  distance: "0.8 km", tip: 300, urgency: "flash",  time: "Just now" },
-    { id: "ORD-1023", store: "FreshFarm",   customer: "Emeka O.", items: 9, total: 21000, distance: "2.1 km", tip: 800, urgency: "normal", time: "5 min ago" },
+  const DEMO_INCOMING = [
+    { id: "ORD-1021", store: "FoodMart VI",  customer: "Funke A.", items: 6, total: 14200, distance: "1.2 km", tip: 500,  urgency: "normal", time: "3 min ago",  address: "12 Adeola St, VI" },
+    { id: "ORD-1022", store: "GlowStore",    customer: "Bola M.",  items: 3, total: 8700,  distance: "0.8 km", tip: 300,  urgency: "flash",  time: "Just now",   address: "5 Ozumba Rd, VI" },
+    { id: "ORD-1023", store: "FreshFarm",    customer: "Emeka O.", items: 9, total: 21000, distance: "2.1 km", tip: 800,  urgency: "normal", time: "5 min ago",  address: "Admiralty Way, Lekki" },
   ];
 
-  const STATS = [
-    { label: "Today's earnings", value: "₦6,400", icon: "💰", color: C.green },
-    { label: "Orders done",      value: "8",       icon: "✅", color: C.accent },
-    { label: "Avg. rating",      value: "4.92",    icon: "⭐", color: C.gold },
-    { label: "Online time",      value: "3h 22m",  icon: "⏱️", color: C.sub },
-  ];
+  useEffect(() => {
+    if (!user?.id) { setLoading(false); return; }
+    Promise.all([
+      sbDB.select("orders", { filter: `status=eq.pending&shopper_id=is.null`, order: "created_at.desc", limit: 20 }),
+      sbDB.select("orders", { filter: `shopper_id=eq.${user.id}&status=in.(confirmed,preparing,picked_up,on_the_way)`, limit: 1 }),
+      sbDB.select("orders", { filter: `shopper_id=eq.${user.id}&status=in.(delivered,cancelled)`, order: "created_at.desc", limit: 30 }),
+      sbDB.select("profiles", { filter: `id=eq.${user.id}`, limit: 1 }),
+    ]).then(([inc, act, hist, prof]) => {
+      setIncoming(inc?.length ? inc : DEMO_INCOMING);
+      setActive(act?.[0] || null);
+      setHistory(hist || []);
+      const p = prof?.[0];
+      if (p) {
+        setEarnings({
+          today:   p.earnings_today   || 0,
+          week:    p.earnings_week    || 0,
+          total:   p.earnings_total   || 0,
+          pending: p.earnings_pending || 0,
+        });
+        setOnline(p.shopper_status === "online");
+      }
+      setLoading(false);
+    }).catch(() => { setIncoming(DEMO_INCOMING); setLoading(false); });
+
+    // Real-time new orders
+    const sub = sbRealtime.subscribe("orders", "status=eq.pending", (payload) => {
+      if (payload.eventType === "INSERT" && payload.new) {
+        setIncoming(prev => [payload.new, ...prev]);
+        if (online) _pushBus.emit({ title: "New order nearby! 🛵", body: `${payload.new.store || "Store"} — ₦${payload.new.total?.toLocaleString()}`, icon: "🛵" });
+      }
+      if (payload.eventType === "UPDATE" && payload.new?.shopper_id && payload.new.shopper_id !== user.id) {
+        setIncoming(prev => prev.filter(o => o.id !== payload.new.id));
+      }
+    });
+    return () => sbRealtime.unsubscribe(sub);
+  }, [user?.id, online]);
+
+  const toggleOnline = async () => {
+    const newState = !online;
+    setOnline(newState);
+    if (user?.id) {
+      await sbDB.update("profiles", { shopper_status: newState ? "online" : "offline" }, `id=eq.${user.id}`).catch(() => {});
+    }
+    toast(newState ? "You are now LIVE 🟢" : "You are now offline", newState ? "success" : undefined);
+  };
+
+  const acceptOrder = async (order) => {
+    setAccepting(order.id);
+    try {
+      await sbDB.update("orders", { shopper_id: user.id, status: "confirmed", updated_at: new Date().toISOString() }, `id=eq.${order.id}`);
+      setActive(order);
+      setIncoming(prev => prev.filter(o => o.id !== order.id));
+      toast("Order accepted! Head to the store 🛵", "success");
+    } catch (e) { toast("Could not accept order. Try again.", "error"); }
+    setAccepting(null);
+  };
+
+  const updateActiveStatus = async (status) => {
+    if (!active) return;
+    await sbDB.update("orders", { status, updated_at: new Date().toISOString() }, `id=eq.${active.id}`).catch(() => {});
+    if (status === "delivered") {
+      // Calculate earnings
+      const earn = Math.round(active.total * 0.12) + (active.tip || 0);
+      toast(`Delivered! You earned ₦${earn.toLocaleString()} 🎉`, "success");
+      setEarnings(e => ({ ...e, today: e.today + earn, total: e.total + earn }));
+      setHistory(prev => [{ ...active, status: "delivered" }, ...prev]);
+      setActive(null);
+    } else {
+      setActive(prev => ({ ...prev, status }));
+      toast(`Status updated: ${status}`, "success");
+    }
+  };
 
   return (
-    <div className="screen" style={{ background: C.bg, paddingBottom: 80 }}>
+    <div className="screen" style={{ background: C.bg, paddingBottom: 100 }}>
       {/* Header */}
-      <div style={{ padding: "52px 20px 16px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+      <div style={{ padding: "52px 20px 20px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <div>
-            <div className="disp" style={{ fontSize: 22, color: C.text }}>Shopper Hub</div>
-            <div style={{ color: C.sub, fontSize: 13, marginTop: 3 }}>Welcome back, Emeka 👋</div>
+            <div className="disp" style={{ fontSize: 24, color: C.text, letterSpacing: "-0.04em" }}>Shopper Hub</div>
+            <div style={{ color: C.sub, fontSize: 13, marginTop: 2 }}>{online ? "You're receiving orders" : "Go online to receive orders"}</div>
           </div>
-          <div onClick={() => { const n = shopperStatus === "offline" ? "online" : "offline"; setShopperStatus(n); toast(n === "online" ? "You're live!" : "Offline", n === "online" ? "🟢" : "😴", n === "online" ? "success" : undefined); }}
-            style={{ display: "flex", alignItems: "center", gap: 8, background: shopperStatus === "online" ? C.greenBg : C.card, border: `1.5px solid ${shopperStatus === "online" ? C.green + "55" : C.border}`, borderRadius: 22, padding: "8px 16px", cursor: "pointer" }}>
-            <div style={{ width: 10, height: 10, borderRadius: "50%", background: shopperStatus === "online" ? C.green : C.muted, flexShrink: 0, animation: shopperStatus === "online" ? "blink 1.4s ease-in-out infinite" : "none" }} />
-            <span style={{ fontWeight: 700, fontSize: 13, color: shopperStatus === "online" ? C.green : C.muted }}>{shopperStatus === "online" ? "Online" : "Go Online"}</span>
+          {/* Online toggle */}
+          <div onClick={toggleOnline} style={{ display: "flex", alignItems: "center", gap: 8, background: online ? C.greenBg : C.card, border: `1.5px solid ${online ? C.green + "44" : C.border}`, borderRadius: 22, padding: "10px 16px", cursor: "pointer", transition: "all .2s" }}>
+            <div style={{ width: 10, height: 10, borderRadius: "50%", background: online ? C.green : C.muted, animation: online ? "blink 1.4s ease-in-out infinite" : "none" }} />
+            <span style={{ fontSize: 14, fontWeight: 700, color: online ? C.green : C.sub }}>{online ? "Online" : "Offline"}</span>
           </div>
         </div>
 
-        {/* Stats strip */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
-          {STATS.map(s => (
-            <div key={s.label} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 8px", textAlign: "center" }}>
-              <div style={{ fontSize: 18, marginBottom: 4 }}>{s.icon}</div>
-              <div className="disp" style={{ fontSize: 13, color: s.color }}>{s.value}</div>
-              <div style={{ color: C.muted, fontSize: 12, marginTop: 2, lineHeight: 1.2 }}>{s.label}</div>
+        {/* Earnings stats */}
+        <div style={{ display: "flex", gap: 10 }}>
+          {[
+            { label: "Today",   value: `₦${earnings.today.toLocaleString()}`,   color: C.green  },
+            { label: "This Week",value: `₦${earnings.week.toLocaleString()}`,   color: C.accent },
+            { label: "Pending", value: `₦${earnings.pending.toLocaleString()}`, color: "#F5C842"},
+          ].map(s => (
+            <div key={s.label} style={{ flex: 1, background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 10px", textAlign: "center" }}>
+              <div className="disp" style={{ fontSize: 16, color: s.color, letterSpacing: "-0.03em" }}>{s.value}</div>
+              <div style={{ color: C.muted, fontSize: 11, marginTop: 2 }}>{s.label}</div>
             </div>
           ))}
         </div>
       </div>
 
+      {/* Active order banner */}
+      {active && (
+        <div style={{ margin: "0 20px 20px", background: `linear-gradient(135deg,${C.accent},#FF9500)`, borderRadius: 18, padding: "16px 18px", boxShadow: `0 8px 28px ${C.accentGlow}` }}>
+          <div style={{ color: "rgba(255,255,255,.8)", fontSize: 12, marginBottom: 4 }}>ACTIVE ORDER</div>
+          <div style={{ fontWeight: 700, fontSize: 16, color: "#fff", marginBottom: 12 }}>{active.id} · {active.store || "Store"}</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            {active.status === "confirmed" && <button onClick={() => updateActiveStatus("picked_up")} style={{ flex: 1, height: 40, background: "rgba(255,255,255,.25)", border: "none", borderRadius: 10, color: "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Picked Up ✓</button>}
+            {active.status === "picked_up" && <button onClick={() => updateActiveStatus("on_the_way")} style={{ flex: 1, height: 40, background: "rgba(255,255,255,.25)", border: "none", borderRadius: 10, color: "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>On the Way 🛵</button>}
+            {active.status === "on_the_way" && <button onClick={() => updateActiveStatus("delivered")} style={{ flex: 1, height: 40, background: "rgba(255,255,255,.9)", border: "none", borderRadius: 10, color: C.accent, fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Mark Delivered 📦</button>}
+            <button onClick={() => goTo("order-chat")} style={{ width: 40, height: 40, background: "rgba(255,255,255,.2)", border: "none", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+              <Icon name="chat" size={18} color="#fff" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Tabs */}
-      <div style={{ display: "flex", gap: 6, padding: "0 20px 14px", overflowX: "auto" }}>
-        {[["incoming","📦 Incoming"],["active","🛵 Active"],["earnings","💰 Earnings"],["ratings","⭐ Ratings"]].map(([id,l]) => (
-          <button key={id} onClick={() => id === "ratings" ? goTo("shopper-ratings") : setActiveTab(id)} style={{ padding: "8px 14px", borderRadius: 20, border: "none", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 600, fontSize: 12.5, cursor: "pointer", background: activeTab === id ? C.accent : C.card, color: activeTab === id ? "#fff" : C.sub, transition: "all .15s", whiteSpace: "nowrap", flexShrink: 0 }}>{l}</button>
+      <div style={{ display: "flex", gap: 8, padding: "0 20px", marginBottom: 20 }}>
+        {[["incoming","Incoming",incoming.length],["history","History",0]].map(([t,label,count]) => (
+          <button key={t} onClick={() => setTab(t)}
+            style={{ flex: 1, height: 38, borderRadius: 10, border: `1.5px solid ${tab===t ? C.accent : C.border}`, background: tab===t ? C.accentBg : "transparent", color: tab===t ? C.accent : C.sub, fontFamily: "Satoshi,sans-serif", fontWeight: tab===t ? 700 : 500, fontSize: 13, cursor: "pointer" }}>
+            {label}{count > 0 ? ` (${count})` : ""}
+          </button>
         ))}
       </div>
 
-      {/* Incoming orders */}
-      {activeTab === "incoming" && (
-        <div style={{ padding: "0 20px", display: "flex", flexDirection: "column", gap: 11 }}>
-          {shopperStatus === "offline" && (
-            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "18px", textAlign: "center" }}>
-              <div style={{ fontSize: 36, marginBottom: 10 }}>😴</div>
-              <div className="disp" style={{ fontSize: 16, color: C.text, marginBottom: 6 }}>You're offline</div>
-              <div style={{ color: C.sub, fontSize: 13, marginBottom: 16 }}>Go online to start receiving orders</div>
-              <Btn C={C} block onClick={() => { setShopperStatus("online"); toast("You're live! Orders incoming 🛵", "🟢", "success"); }}>Go Online</Btn>
-            </div>
-          )}
-          {shopperStatus !== "offline" && INCOMING.map(o => (
-            <div key={o.id} style={{ background: C.card, border: `1.5px solid ${o.urgency === "flash" ? C.accent : C.border}`, borderRadius: 16, padding: "14px 15px", animation: "up .25s ease", position: "relative", overflow: "hidden" }}>
-              {o.urgency === "flash" && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: `linear-gradient(90deg, ${C.accent}, ${C.gold})` }} />}
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
-                <div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 3 }}>
-                    <div className="disp" style={{ fontSize: 15, color: C.text }}>{o.store}</div>
-                    {o.urgency === "flash" && <span style={{ fontSize: 12, fontWeight: 700, color: C.accent, background: C.accentBg, padding: "2px 7px", borderRadius: 5 }}>⚡ FLASH</span>}
+      <div style={{ padding: "0 20px" }}>
+        {/* INCOMING */}
+        {tab === "incoming" && (loading
+          ? [1,2].map(i => <div key={i} style={{ height: 120, background: C.card, borderRadius: 18, marginBottom: 12, animation: "shimmer 1.4s ease-in-out infinite" }} />)
+          : !online
+            ? <div style={{ textAlign: "center", padding: "48px 20px" }}>
+                <div style={{ fontSize: 48, marginBottom: 16 }}>😴</div>
+                <div className="disp" style={{ fontSize: 20, color: C.text, marginBottom: 8 }}>You're offline</div>
+                <div style={{ color: C.sub, fontSize: 14, marginBottom: 24 }}>Go online to start receiving orders.</div>
+                <button onClick={toggleOnline} style={{ height: 50, padding: "0 32px", background: `linear-gradient(135deg,${C.green},#00C853)`, border: "none", borderRadius: 14, color: "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 15, cursor: "pointer" }}>Go Online</button>
+              </div>
+            : incoming.length === 0
+              ? <div style={{ textAlign: "center", padding: "48px 20px", color: C.sub }}>No orders yet. Stay online to receive them.</div>
+              : incoming.map(o => (
+                <div key={o.id} style={{ background: C.card, border: `1px solid ${o.urgency === "flash" ? C.accent : C.border}`, borderRadius: 18, padding: "16px", marginBottom: 12, animation: "up .25s ease" }}>
+                  {o.urgency === "flash" && <div style={{ background: `linear-gradient(90deg,${C.accent},#FF9500)`, color: "#fff", borderRadius: 8, padding: "3px 10px", fontSize: 11, fontWeight: 800, display: "inline-block", marginBottom: 10 }}>⚡ FLASH ORDER</div>}
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                    <div style={{ fontWeight: 700, fontSize: 15, color: C.text }}>{o.store || "Store"}</div>
+                    <div style={{ color: C.sub, fontSize: 12 }}>{o.time}</div>
                   </div>
-                  <div style={{ color: C.sub, fontSize: 12 }}>{o.customer} · {o.items} items · {o.time}</div>
-                </div>
-                <div style={{ textAlign: "right" }}>
-                  <div className="disp" style={{ fontSize: 15, color: C.text }}>₦{o.total.toLocaleString()}</div>
-                  <div style={{ color: C.green, fontSize: 12, fontWeight: 600 }}>+₦{o.tip} tip</div>
-                </div>
-              </div>
-              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-                {[["📍", o.distance], ["🏪", o.store], ["📦", `${o.items} items`]].map(([icon, val]) => (
-                  <div key={val} style={{ display: "flex", alignItems: "center", gap: 4, background: C.surface, borderRadius: 7, padding: "4px 9px" }}>
-                    <span style={{ fontSize: 12 }}>{icon}</span>
-                    <span style={{ color: C.sub, fontSize: 12 }}>{val}</span>
+                  <div style={{ display: "flex", gap: 16, marginBottom: 12 }}>
+                    {[["pin",o.distance || "—"],["tag",`${o.items || "?"} items`],["gift",`₦${(o.tip||0).toLocaleString()} tip`]].map(([icon,val]) => (
+                      <div key={icon} style={{ display: "flex", alignItems: "center", gap: 5, color: C.sub, fontSize: 12 }}>
+                        <Icon name={icon} size={13} color={C.muted} />{val}
+                      </div>
+                    ))}
                   </div>
-                ))}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div className="disp" style={{ fontSize: 18, color: C.text }}>₦{(o.total||0).toLocaleString()}</div>
+                    <button onClick={() => acceptOrder(o)} disabled={!!accepting || !!active}
+                      style={{ height: 42, padding: "0 22px", background: accepting === o.id ? C.border : `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 12, color: accepting === o.id ? C.muted : "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 14, cursor: accepting || active ? "default" : "pointer", boxShadow: accepting || active ? "none" : `0 4px 14px ${C.accentGlow}`, transition: "all .2s" }}>
+                      {accepting === o.id ? "Accepting…" : active ? "Busy" : "Accept"}
+                    </button>
+                  </div>
+                </div>
+              ))
+        )}
+
+        {/* HISTORY */}
+        {tab === "history" && (history.length === 0
+          ? <div style={{ textAlign: "center", padding: "48px 20px", color: C.sub }}>No completed deliveries yet.</div>
+          : history.map((o, i) => (
+            <div key={o.id || i} style={{ display: "flex", gap: 12, background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, padding: "14px", marginBottom: 10 }}>
+              <div style={{ width: 44, height: 44, borderRadius: 13, background: C.greenBg, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 20 }}>📦</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 14, color: C.text }}>{o.id}</div>
+                <div style={{ color: C.muted, fontSize: 12, marginTop: 2 }}>{o.store || "Store"} · {o.created_at ? new Date(o.created_at).toLocaleDateString("en-NG") : "—"}</div>
               </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => toast("Order declined", "👋")} style={{ flex: 1, padding: "10px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, color: C.muted, cursor: "pointer", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 600, fontSize: 13 }}>Decline</button>
-                <button onClick={() => { toast("Order accepted! Head to " + o.store + " 🛵", "✅", "success"); setActiveTab("active"); }} style={{ flex: 2, padding: "10px", background: C.accent, border: "none", borderRadius: 10, color: "#fff", cursor: "pointer", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 13, boxShadow: `0 3px 12px ${C.accent}44` }}>Accept · ₦{(o.total * 0.15 + o.tip).toLocaleString()}</button>
-              </div>
+              <div className="disp" style={{ color: C.green, fontSize: 15 }}>+₦{Math.round((o.total||0)*0.12).toLocaleString()}</div>
             </div>
-          ))}
-        </div>
-      )}
-
-      {/* Active order */}
-      {activeTab === "active" && (
-        <div style={{ padding: "0 20px" }}>
-          <ActiveShopperOrder C={C} toast={toast} />
-        </div>
-      )}
-
-      {/* Earnings */}
-      {activeTab === "earnings" && (
-        <div style={{ padding: "0 20px" }}>
-          <ShopperEarnings C={C} />
-        </div>
-      )}
+          ))
+        )}
+      </div>
     </div>
   );
 }
 
-// ── ActiveShopperOrder ────────────────────────────────────────
 function ActiveShopperOrder({ C, toast }) {
   const [step, setStep] = useState(0);
   const { pos: myPos, start, stop } = useGeolocation();
@@ -6438,151 +7149,231 @@ function RateAppPrompt({ C, onDismiss }) {
 
 // ── StoreDashboard ────────────────────────────────────────────
 function StoreDashboard({ goTo, C }) {
-  const toast = useToast();
-  const [tab, setTab] = useState("overview");
+  const { user }   = useAuth() || {};
+  const toast      = useToast();
+  const [tab, setTab]         = useState("orders");
+  const [orders, setOrders]   = useState([]);
+  const [products, setProducts] = useState([]);
+  const [storeInfo, setStoreInfo] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [toggling, setToggling] = useState(false);
 
-  const STATS = [
-    { icon: "💰", label: "Revenue today",  value: "₦42,800",  change: "+18%",  up: true  },
-    { icon: "📦", label: "Orders today",   value: "34",        change: "+5",    up: true  },
-    { icon: "⭐", label: "Avg. rating",    value: "4.87",      change: "+0.02", up: true  },
-    { icon: "👤", label: "New customers",  value: "12",        change: "-3",    up: false },
+  const DEMO_ORDERS = [
+    { id: "ORD-9820", customer: "Funke A.", items: ["Fresh Tomatoes","Rice 5kg"], total: 8200,  status: "pending",    time: "2 min ago" },
+    { id: "ORD-9819", customer: "Emeka O.", items: ["Earbuds","Charger"],          total: 14500, status: "confirmed",  time: "15 min ago" },
+    { id: "ORD-9818", customer: "Bola M.", items: ["Vitamin C Serum"],             total: 4200,  status: "preparing",  time: "32 min ago" },
+    { id: "ORD-9817", customer: "Tunde K.", items: ["Organic Veggies x3"],         total: 2800,  status: "delivered",  time: "1h ago" },
   ];
 
-  const ORDERS = [
-    { id: "ORD-9812", customer: "Funke A.", items: 4, total: 8200,  status: "pending",    time: "2 min ago" },
-    { id: "ORD-9811", customer: "Emeka O.", items: 2, total: 3800,  status: "confirmed",  time: "9 min ago" },
-    { id: "ORD-9810", customer: "Bola M.",  items: 7, total: 14100, status: "dispatched", time: "24 min ago" },
-    { id: "ORD-9809", customer: "Tunde K.", items: 1, total: 2200,  status: "delivered",  time: "1h ago" },
-  ];
+  useEffect(() => {
+    if (!user?.id) { setLoading(false); return; }
+    Promise.all([
+      sbDB.select("stores",   { filter: `user_id=eq.${user.id}`, limit: 1 }),
+      sbDB.select("orders",   { filter: `store_owner_id=eq.${user.id}`, order: "created_at.desc", limit: 50 }),
+    ]).then(([storeRows, orderRows]) => {
+      setStoreInfo(storeRows?.[0] || null);
+      setOrders(orderRows?.length ? orderRows : DEMO_ORDERS);
 
-  const STATUS_COLORS = { pending: C.gold, confirmed: C.accent, dispatched: "#8B5CF6", delivered: C.green };
-  const STATUS_BG     = { pending: C.goldBg, confirmed: C.accentBg, dispatched: "rgba(139,92,246,.1)", delivered: C.greenBg };
+      // Load products
+      const storeId = storeRows?.[0]?.id;
+      if (storeId) {
+        sbDB.select("products", { filter: `store_id=eq.${storeId}`, order: "created_at.desc", limit: 100 })
+          .then(rows => setProducts(rows || [])).catch(() => {});
+      }
+      setLoading(false);
+    }).catch(() => { setOrders(DEMO_ORDERS); setLoading(false); });
 
-  const CHART = [28, 41, 35, 52, 48, 67, 58, 72, 65, 80, 74, 90, 85, 94, 88, 102, 97, 110, 105, 118, 112, 124, 119, 130];
-  const maxC = Math.max(...CHART);
+    // Real-time new orders
+    const sub = sbRealtime.subscribe("orders", `store_owner_id=eq.${user.id}`, (payload) => {
+      if (payload.eventType === "INSERT") {
+        setOrders(prev => [payload.new, ...prev]);
+        _pushBus.emit({ title: "New order! 🛒", body: `Order ${payload.new.id} — ₦${payload.new.total?.toLocaleString()}`, icon: "🛒" });
+      }
+      if (payload.eventType === "UPDATE") {
+        setOrders(prev => prev.map(o => o.id === payload.new.id ? payload.new : o));
+      }
+    });
+    return () => sbRealtime.unsubscribe(sub);
+  }, [user?.id]);
+
+  const updateOrder = async (orderId, status) => {
+    await sbDB.update("orders", { status, updated_at: new Date().toISOString() }, `id=eq.${orderId}`).catch(() => {});
+    setOrders(prev => prev.map(o => o.id === orderId ? { ...o, status } : o));
+    toast(`Order ${status}`, "success");
+  };
+
+  const toggleStore = async () => {
+    if (!storeInfo?.id) return;
+    setToggling(true);
+    const newState = !storeInfo.is_open;
+    await sbDB.update("stores", { is_open: newState }, `id=eq.${storeInfo.id}`).catch(() => {});
+    setStoreInfo(prev => ({ ...prev, is_open: newState }));
+    toast(newState ? "Store is now OPEN 🟢" : "Store is now CLOSED 🔴", newState ? "success" : undefined);
+    setToggling(false);
+  };
+
+  const STATUS_COLOR = {
+    pending:   { bg: "rgba(245,200,66,.12)",  text: "#F5C842" },
+    confirmed: { bg: "rgba(255,149,0,.12)",    text: "#FF9500" },
+    preparing: { bg: "rgba(155,111,255,.12)",  text: "#9B6FFF" },
+    picked_up: { bg: "rgba(0,224,135,.12)",    text: "#00E087" },
+    on_the_way:{ bg: "rgba(0,224,135,.12)",    text: "#00E087" },
+    delivered: { bg: "rgba(0,224,135,.12)",    text: "#00E087" },
+    cancelled: { bg: "rgba(239,68,68,.12)",    text: "#EF4444" },
+  };
+
+  const pendingCount   = orders.filter(o => o.status === "pending").length;
+  const todayRevenue   = orders.filter(o => {
+    const d = new Date(o.created_at || o.time);
+    return d.toDateString() === new Date().toDateString() && o.status !== "cancelled";
+  }).reduce((s, o) => s + (o.total || 0), 0);
+  const totalOrders    = orders.length;
+  const isOpen         = storeInfo?.is_open !== false;
 
   return (
-    <div className="screen" style={{ background: C.bg, paddingBottom: 80 }}>
-      <div style={{ padding: "52px 20px 14px" }}>
+    <div className="screen" style={{ background: C.bg, paddingBottom: 100 }}>
+      {/* Header */}
+      <div style={{ padding: "52px 20px 20px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <Back onClick={() => goTo("profile")} C={C} />
-            <div>
-              <div className="disp" style={{ fontSize: 20, color: C.text }}>FoodMart VI</div>
-              <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 2 }}>
-                <div style={{ width: 7, height: 7, borderRadius: "50%", background: C.green }} />
-                <span style={{ color: C.green, fontSize: 12, fontWeight: 600 }}>Open</span>
-                <span style={{ color: C.muted, fontSize: 12 }}>· closes 10pm</span>
-              </div>
-            </div>
+          <div>
+            <div className="disp" style={{ fontSize: 24, color: C.text, letterSpacing: "-0.04em" }}>{storeInfo?.store_name || storeInfo?.name || "My Store"}</div>
+            <div style={{ color: C.sub, fontSize: 13, marginTop: 2 }}>{storeInfo?.area || "Store Dashboard"}</div>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <Btn C={C} sm outline onClick={() => goTo("store-analytics")}>📊 Analytics</Btn>
-            <Btn C={C} sm outline onClick={() => toast("Store settings saved", "⚙️", "success")}>⚙️ Settings</Btn>
+          {/* Open/Close toggle */}
+          <div onClick={toggleStore} style={{ display: "flex", alignItems: "center", gap: 8, background: isOpen ? C.greenBg : C.card, border: `1.5px solid ${isOpen ? C.green + "44" : C.border}`, borderRadius: 22, padding: "8px 14px", cursor: "pointer" }}>
+            <div style={{ width: 10, height: 10, borderRadius: "50%", background: isOpen ? C.green : C.muted, animation: isOpen ? "blink 1.4s ease-in-out infinite" : "none" }} />
+            <span style={{ fontSize: 13, fontWeight: 700, color: isOpen ? C.green : C.sub }}>{toggling ? "…" : isOpen ? "Open" : "Closed"}</span>
           </div>
         </div>
-        {/* KPI strip */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8, marginBottom: 16 }}>
-          {STATS.map(s => (
-            <div key={s.label} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 10px" }}>
-              <div style={{ fontSize: 18, marginBottom: 5 }}>{s.icon}</div>
-              <div className="disp" style={{ fontSize: 14, color: C.text }}>{s.value}</div>
-              <div style={{ fontSize: 12, fontWeight: 700, color: s.up ? C.green : "#EF4444", marginTop: 3 }}>{s.change}</div>
+
+        {/* Stats */}
+        <div style={{ display: "flex", gap: 10 }}>
+          {[
+            { label: "Pending",      value: pendingCount, color: "#F5C842" },
+            { label: "Today Revenue",value: `₦${todayRevenue.toLocaleString()}`, color: C.green },
+            { label: "Total Orders", value: totalOrders, color: C.accent },
+          ].map(s => (
+            <div key={s.label} style={{ flex: 1, background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 10px", textAlign: "center" }}>
+              <div className="disp" style={{ fontSize: 18, color: s.color, letterSpacing: "-0.03em" }}>{s.value}</div>
+              <div style={{ color: C.muted, fontSize: 11, marginTop: 2 }}>{s.label}</div>
             </div>
           ))}
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="hrow" style={{ padding: "0 20px 14px" }}>
-        {[["overview","Overview"],["orders","Orders"],["products","Products"],["payouts","Payouts"]].map(([id,l]) => (
-          <button key={id} onClick={() => setTab(id)} style={{ padding: "7px 16px", borderRadius: 20, border: "none", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 600, fontSize: 13, cursor: "pointer", background: tab === id ? C.accent : C.card, color: tab === id ? "#fff" : C.sub, flexShrink: 0, transition: "all .15s" }}>{l}</button>
+      <div style={{ display: "flex", gap: 8, padding: "0 20px", marginBottom: 20 }}>
+        {["orders","products","settings"].map(t => (
+          <button key={t} onClick={() => setTab(t)}
+            style={{ flex: 1, height: 38, borderRadius: 10, border: `1.5px solid ${tab===t ? C.accent : C.border}`, background: tab===t ? C.accentBg : "transparent", color: tab===t ? C.accent : C.sub, fontFamily: "Satoshi,sans-serif", fontWeight: tab===t ? 700 : 500, fontSize: 13, cursor: "pointer", textTransform: "capitalize" }}>
+            {t}{t === "orders" && pendingCount > 0 ? ` (${pendingCount})` : ""}
+          </button>
         ))}
       </div>
 
-      {tab === "overview" && (
-        <div style={{ padding: "0 20px", display: "flex", flexDirection: "column", gap: 14 }}>
-          {/* Mini revenue chart */}
-          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 15px" }}>
-            <div className="disp" style={{ fontSize: 14, color: C.text, marginBottom: 12 }}>Revenue (last 24h)</div>
-            <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 60 }}>
-              {CHART.map((v, i) => (
-                <div key={i} style={{ flex: 1, background: i === CHART.length - 1 ? C.accent : `${C.accent}40`, borderRadius: "2px 2px 0 0", height: `${(v/maxC)*56}px`, minHeight: 3, transition: "height .4s ease" }} />
-              ))}
-            </div>
+      <div style={{ padding: "0 20px" }}>
+        {/* ORDERS TAB */}
+        {tab === "orders" && (loading
+          ? [1,2,3].map(i => <div key={i} style={{ height: 80, background: C.card, borderRadius: 16, marginBottom: 10, animation: "shimmer 1.4s ease-in-out infinite" }} />)
+          : orders.map(o => {
+            const sc = STATUS_COLOR[o.status] || STATUS_COLOR.pending;
+            const items = o.items ? (Array.isArray(o.items) ? o.items : (typeof o.items === "string" ? JSON.parse(o.items) : [])) : [];
+            return (
+              <div key={o.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: "16px", marginBottom: 12, animation: "up .2s ease" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 14, color: C.text }}>{o.id}</div>
+                    <div style={{ color: C.sub, fontSize: 12, marginTop: 2 }}>{o.customer || "Customer"} · {o.time || "Just now"}</div>
+                  </div>
+                  <div style={{ background: sc.bg, color: sc.text, borderRadius: 8, padding: "4px 10px", fontSize: 12, fontWeight: 700 }}>{o.status}</div>
+                </div>
+                <div style={{ color: C.sub, fontSize: 13, marginBottom: 12 }}>
+                  {(Array.isArray(items) ? items : []).slice(0, 3).map(i => (typeof i === "string" ? i : i.name)).join(", ")}
+                  {items.length > 3 ? ` +${items.length - 3} more` : ""}
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div className="disp" style={{ fontSize: 16, color: C.text }}>₦{(o.total || 0).toLocaleString()}</div>
+                  {o.status === "pending" && (
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button onClick={() => updateOrder(o.id, "cancelled")}
+                        style={{ padding: "7px 14px", borderRadius: 10, border: "1.5px solid rgba(239,68,68,.3)", background: "rgba(239,68,68,.08)", color: "#EF4444", fontFamily: "Satoshi,sans-serif", fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
+                        Decline
+                      </button>
+                      <button onClick={() => updateOrder(o.id, "confirmed")}
+                        style={{ padding: "7px 16px", borderRadius: 10, border: "none", background: `linear-gradient(135deg,${C.accent},#FF9500)`, color: "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 13, cursor: "pointer", boxShadow: `0 4px 12px ${C.accentGlow}` }}>
+                        Accept
+                      </button>
+                    </div>
+                  )}
+                  {o.status === "confirmed" && (
+                    <button onClick={() => updateOrder(o.id, "preparing")}
+                      style={{ padding: "7px 16px", borderRadius: 10, border: "none", background: "#9B6FFF", color: "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+                      Start Preparing
+                    </button>
+                  )}
+                  {o.status === "preparing" && (
+                    <button onClick={() => updateOrder(o.id, "picked_up")}
+                      style={{ padding: "7px 16px", borderRadius: 10, border: "none", background: C.green, color: "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+                      Ready for Pickup
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })
+        )}
+
+        {/* PRODUCTS TAB */}
+        {tab === "products" && (
+          <div>
+            <button onClick={() => goTo("products")}
+              style={{ width: "100%", height: 52, background: C.accentBg, border: `1.5px dashed ${C.accentLine}`, borderRadius: 16, color: C.accent, fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 15, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 16 }}>
+              <Icon name="plus" size={18} color={C.accent} /> Add New Product
+            </button>
+            {products.length === 0
+              ? <div style={{ textAlign: "center", padding: "40px 20px", color: C.sub, fontSize: 14 }}>No products yet. Add your first product to start selling.</div>
+              : products.map(p => (
+                <div key={p.id} style={{ display: "flex", gap: 12, background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, padding: "14px", marginBottom: 10 }}>
+                  <div style={{ width: 56, height: 56, borderRadius: 14, background: C.surface, overflow: "hidden", flexShrink: 0 }}>
+                    {p.image_url ? <img src={p.image_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="tag" size={24} color={C.muted} /></div>}
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600, fontSize: 14, color: C.text }}>{p.name}</div>
+                    <div style={{ color: C.muted, fontSize: 12, marginTop: 2 }}>{p.category}</div>
+                  </div>
+                  <div className="disp" style={{ color: C.accent, fontSize: 15 }}>₦{Number(p.price || 0).toLocaleString()}</div>
+                </div>
+              ))
+            }
           </div>
-          {/* Recent orders */}
-          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 15px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-              <div className="disp" style={{ fontSize: 14, color: C.text }}>Live orders</div>
-              <button onClick={() => setTab("orders")} style={{ background: "none", border: "none", color: C.accent, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "Satoshi,system-ui,sans-serif" }}>See all →</button>
-            </div>
-            {ORDERS.slice(0,3).map((o, i) => (
-              <div key={o.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: i < 2 ? `1px solid ${C.border}` : "none" }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 500, fontSize: 13.5, color: C.text }}>{o.customer} · {o.items} items</div>
-                  <div style={{ color: C.muted, fontSize: 12, marginTop: 1 }}>{o.id} · {o.time}</div>
+        )}
+
+        {/* SETTINGS TAB */}
+        {tab === "settings" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {[
+              { label: "Store Profile",     icon: "store",   go: "store-onboarding" },
+              { label: "Payout Settings",   icon: "wallet",  go: "payments" },
+              { label: "Opening Hours",     icon: "clock",   go: "store-onboarding" },
+              { label: "Delivery Radius",   icon: "pin",     go: "store-onboarding" },
+              { label: "Store Analytics",   icon: "chart",   go: "store-analytics" },
+            ].map(item => (
+              <div key={item.label} onClick={() => goTo(item.go)}
+                style={{ display: "flex", alignItems: "center", gap: 13, padding: "16px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, cursor: "pointer" }} className="tap">
+                <div style={{ width: 40, height: 40, borderRadius: 12, background: C.accentBg, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Icon name={item.icon} size={19} color={C.accent} />
                 </div>
-                <div style={{ textAlign: "right" }}>
-                  <div style={{ fontWeight: 700, color: C.text, fontSize: 13 }}>₦{o.total.toLocaleString()}</div>
-                  <AnimatedStatus status={o.status} C={C} size="sm" pulse />
-                </div>
+                <span style={{ flex: 1, fontSize: 15, fontWeight: 500, color: C.text }}>{item.label}</span>
+                <Icon name="chevronR" size={16} color={C.muted} />
               </div>
             ))}
           </div>
-        </div>
-      )}
-
-      {tab === "orders" && (
-        <div style={{ padding: "0 20px", display: "flex", flexDirection: "column", gap: 10 }}>
-          {ORDERS.map(o => (
-            <div key={o.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "13px 15px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-                <div>
-                  <div className="disp" style={{ fontSize: 14, color: C.text }}>{o.id}</div>
-                  <div style={{ color: C.sub, fontSize: 12, marginTop: 2 }}>{o.customer} · {o.items} items · {o.time}</div>
-                </div>
-                <div style={{ textAlign: "right" }}>
-                  <div className="disp" style={{ fontSize: 14, color: C.text }}>₦{o.total.toLocaleString()}</div>
-                  <AnimatedStatus status={o.status} C={C} size="sm" pulse />
-                </div>
-              </div>
-              {o.status === "pending" && (
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button onClick={() => toast("Order confirmed ✓", "✅", "success")} style={{ flex: 1, padding: "9px", background: C.green, border: "none", borderRadius: 9, color: "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Confirm</button>
-                  <button onClick={() => toast("Order rejected", "❌", "error")} style={{ flex: 1, padding: "9px", background: "transparent", border: `1px solid #EF444466`, borderRadius: 9, color: "#EF4444", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 600, fontSize: 13, cursor: "pointer" }}>Reject</button>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {tab === "products" && <ProductManager goTo={goTo} C={C} embedded />}
-
-      {tab === "payouts" && (
-        <div style={{ padding: "0 20px", display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ background: `linear-gradient(135deg,${C.accent},${C.gold})`, borderRadius: 16, padding: "18px" }}>
-            <div style={{ color: "rgba(255,255,255,.8)", fontSize: 13, marginBottom: 4 }}>Pending payout</div>
-            <div className="disp" style={{ fontSize: 28, color: "#fff", marginBottom: 14 }}>₦186,400</div>
-            <Btn C={C} style={{ background: "rgba(255,255,255,.2)", border: "none", color: "#fff" }} onClick={() => toast("Payout initiated! Arrives in 1–2 business days", "💸", "success")}>Request payout →</Btn>
-          </div>
-          {[["This week", "₦42,800", "28 orders"],["Last week","₦38,200","24 orders"],["This month","₦186,400","102 orders"]].map(([p,a,o]) => (
-            <div key={p} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 13, padding: "13px 15px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div>
-                <div style={{ fontWeight: 500, fontSize: 14, color: C.text }}>{p}</div>
-                <div style={{ color: C.muted, fontSize: 12, marginTop: 2 }}>{o}</div>
-              </div>
-              <div className="disp" style={{ fontSize: 16, color: C.green }}>{a}</div>
-            </div>
-          ))}
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
 
-// ── ProductManager ────────────────────────────────────────────
 function ProductManager({ goTo, C, embedded }) {
   const toast = useToast();
   const [products, setProducts] = useState([
@@ -8645,41 +9436,87 @@ function usePWAManifest() {
 // ── PWA Install Banner ────────────────────────────────────────
 function PWAInstallBanner({ C }) {
   const { prompt, installed, isStandalone, install } = usePWAInstall();
-  const toast = useToast();
-  const [dismissed, setDismissed] = useState(false);
+  const [dismissed, setDismissed]   = useState(false);
+  const [showIOS, setShowIOS]       = useState(false);
+  const [installing, setInstalling] = useState(false);
   usePWAManifest();
-  useEffect(() => { if (C) injectMicroAnimationCSS(C); }, [C?.accent]);
 
-  if (isStandalone || installed || dismissed || !prompt) return null;
+  // Detect iOS
+  const isIOS = typeof navigator !== "undefined" &&
+    /iphone|ipad|ipod/i.test(navigator.userAgent) &&
+    !(navigator.userAgent.includes("Chrome"));
+
+  // Don't show if already installed or dismissed
+  if (isStandalone || installed || dismissed) return null;
+  if (!prompt && !isIOS) return null;
+
+  const handleInstall = async () => {
+    if (isIOS) { setShowIOS(true); return; }
+    setInstalling(true);
+    try { await install?.(); } catch {}
+    setInstalling(false);
+  };
+
+  const dismiss = () => {
+    setDismissed(true);
+    try { safeStorage.setItem("pwa-dismissed", "1"); } catch {}
+  };
 
   return (
-    <div style={{ margin: '0 20px 16px', background: C.dark ? 'linear-gradient(135deg,#1a1200,#0a0a0e)' : 'linear-gradient(135deg,#fff8f0,#fff)', border: `1.5px solid ${C.accent}33`, borderRadius: 16, padding: '14px 15px', animation: 'up .35s ease' }}>
-      <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-        <div style={{ width: 46, height: 46, borderRadius: 13, background: 'linear-gradient(135deg,#FF6B35,#FF9500)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, boxShadow: `0 4px 14px #FF572044` }}>
-          <svg width="24" height="24" viewBox="0 0 64 64" fill="none">
-            <path d="M13 29C13 26.2 15.2 24 18 24H46C48.8 24 51 26.2 51 29V46C51 48.8 48.8 51 46 51H18C15.2 51 13 48.8 13 46V29Z" fill="white" fillOpacity="0.9"/>
-            <path d="M23 24C23 18 27 13 32 13C37 13 41 18 41 24" stroke="white" strokeWidth="3" strokeLinecap="round" fill="none"/>
-          </svg>
+    <>
+      {/* Install banner */}
+      <div style={{ position: "fixed", bottom: 90, left: 16, right: 16, zIndex: 1100, animation: "up .35s ease" }}>
+        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 20, padding: "16px 16px", boxShadow: "0 8px 32px rgba(0,0,0,.18)", display: "flex", gap: 12, alignItems: "center" }}>
+          {/* App icon */}
+          <div style={{ width: 52, height: 52, borderRadius: 15, background: `linear-gradient(135deg,${C.accent},#FF9500)`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, boxShadow: `0 4px 16px ${C.accentGlow}` }}>
+            <Icon name="store" size={26} color="#fff" strokeWidth={1.5} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 14, color: C.text, marginBottom: 2 }}>Install Errand App</div>
+            <div style={{ color: C.sub, fontSize: 12, lineHeight: 1.4 }}>Add to home screen for faster access & offline use</div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
+            <button onClick={handleInstall} disabled={installing}
+              style={{ height: 36, padding: "0 16px", background: `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 10, color: "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap" }}>
+              {installing ? "…" : "Install"}
+            </button>
+            <button onClick={dismiss}
+              style={{ height: 28, background: "none", border: "none", color: C.muted, fontSize: 12, cursor: "pointer", fontFamily: "Satoshi,sans-serif" }}>
+              Not now
+            </button>
+          </div>
         </div>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontWeight: 700, fontSize: 14.5, color: C.text, marginBottom: 2 }}>Install Errand App</div>
-          <div style={{ color: C.sub, fontSize: 12.5, lineHeight: 1.4 }}>Faster access, offline support & push notifications</div>
+      </div>
+
+      {/* iOS instructions modal */}
+      {showIOS && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 9000, background: "rgba(0,0,0,.6)", display: "flex", flexDirection: "column", justifyContent: "flex-end" }} onClick={() => setShowIOS(false)}>
+          <div style={{ background: C.card, borderRadius: "24px 24px 0 0", padding: "28px 24px max(env(safe-area-inset-bottom,24px),24px)", animation: "slideUp .3s ease" }} onClick={e => e.stopPropagation()}>
+            <div className="disp" style={{ fontSize: 22, color: C.text, marginBottom: 6 }}>Install on iPhone</div>
+            <div style={{ color: C.sub, fontSize: 14, marginBottom: 24, lineHeight: 1.6 }}>Add Errand to your Home Screen for the best experience.</div>
+            {[
+              { step: "1", icon: "menu", text: 'Tap the Share button at the bottom of Safari (the square with an arrow)' },
+              { step: "2", icon: "plus", text: 'Scroll down and tap "Add to Home Screen"' },
+              { step: "3", icon: "check", text: 'Tap "Add" in the top right corner' },
+            ].map(s => (
+              <div key={s.step} style={{ display: "flex", gap: 14, alignItems: "flex-start", marginBottom: 18 }}>
+                <div style={{ width: 32, height: 32, borderRadius: "50%", background: C.accentBg, border: `1.5px solid ${C.accentLine}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <span style={{ fontSize: 13, fontWeight: 800, color: C.accent }}>{s.step}</span>
+                </div>
+                <div style={{ color: C.text, fontSize: 14, lineHeight: 1.6, paddingTop: 4 }}>{s.text}</div>
+              </div>
+            ))}
+            <button onClick={() => setShowIOS(false)}
+              style={{ width: "100%", height: 52, background: `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 14, color: "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 16, cursor: "pointer", marginTop: 8 }}>
+              Got it!
+            </button>
+          </div>
         </div>
-        <button onClick={() => setDismissed(true)} style={{ background: 'none', border: 'none', color: C.muted, fontSize: 20, cursor: 'pointer', flexShrink: 0 }}>×</button>
-      </div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-        <button onClick={async () => { const ok = await install(); if(ok) toast('Errand installed! 🎉', '📱', 'success'); }} style={{ flex: 1, padding: '10px', background: C.accent, border: 'none', borderRadius: 10, color: '#fff', fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 13.5, cursor: 'pointer' }}>
-          📲 Add to Home Screen
-        </button>
-        <button onClick={() => setDismissed(true)} style={{ padding: '10px 14px', background: 'transparent', border: `1px solid ${C.border}`, borderRadius: 10, color: C.muted, fontFamily: "Satoshi,system-ui,sans-serif", fontSize: 13, cursor: 'pointer' }}>
-          Not now
-        </button>
-      </div>
-    </div>
+      )}
+    </>
   );
 }
 
-// ── PWA Settings section (shown inside Settings screen) ───────
 function PWASettings({ C }) {
   const { isStandalone, installed, prompt, install } = usePWAInstall();
   const toast = useToast();
@@ -11537,7 +12374,7 @@ function useAdminData() {
     ]).then(([u,o,s,p]) => {
       const _u = u?.length ? u : DEMO_USERS;
       const _o = o?.length ? o : DEMO_ORDERS;
-      const _s = s?.length ? s : DEMO_STORES;
+      const _s = s?.length ? s : ADMIN_DEMO_STORES;
       const _p = p?.length ? p : DEMO_PAYOUTS;
       setUsers(_u); setOrders(_o); setStores(_s); setPayouts(_p);
       setStats({
@@ -11563,11 +12400,39 @@ function useAdminData() {
     return unsub;
   }, []);
 
-  const updateOrderStatus = async (id, status) => {
-    await sbDB.update("orders", { status }, `id=eq.${id}`);
-    setOrders(p=>p.map(o=>o.id===id?{...o,status}:o));
-    // Notify customer
-    serverSendPush(id, { title:`Order ${status}`, body:`Your order is now: ${status}`, tag:`order-${id}` });
+  const updateOrderStatus = async (orderId, status) => {
+    await sbDB.update("orders", {
+      status,
+      updated_at: new Date().toISOString(),
+    }, `id=eq.${orderId}`);
+    setOrders(p => p.map(o => o.id === orderId ? { ...o, status } : o));
+
+    // Find the order's user_id to notify them
+    const order = orders.find(o => o.id === orderId);
+    if (order?.user_id) {
+      const statusMessages = {
+        confirmed:   { title: "Order confirmed! ✅", body: "Your order is being prepared.", tag: `order-${orderId}` },
+        preparing:   { title: "Being prepared 👨‍🍳", body: "Your order is being packed.", tag: `order-${orderId}` },
+        assigned:    { title: "Shopper assigned 🛵", body: "A shopper is heading to pick up.", tag: `order-${orderId}` },
+        picked_up:   { title: "Order picked up! 🛵", body: "Your shopper is on the way.", tag: `order-${orderId}` },
+        on_the_way:  { title: "Almost there! 📍", body: "Your order is nearby.", tag: `order-${orderId}` },
+        delivered:   { title: "Delivered! 📦", body: "Enjoy your order. Rate your experience.", tag: `order-${orderId}` },
+        cancelled:   { title: "Order cancelled ❌", body: "A refund will be processed shortly.", tag: `order-${orderId}` },
+      };
+      const msg = statusMessages[status] || { title: `Order update`, body: `Status: ${status}`, tag: `order-${orderId}` };
+      await serverSendPush(order.user_id, { ...msg, url: "/tracking" });
+
+      // Save notification to DB
+      await sbDB.insert("notifications", {
+        user_id: order.user_id,
+        title: msg.title,
+        body: msg.body,
+        type: "order",
+        order_id: orderId,
+        read: false,
+        created_at: new Date().toISOString(),
+      }).catch(() => {});
+    }
   };
 
   const approvePayout = async (payout) => {
@@ -11599,7 +12464,7 @@ const DEMO_ORDERS = [
   {id:"ORD-9816",user_id:"u1",store_id:"s2",total:6700, status:"delivered", created_at:new Date(Date.now()-7200000).toISOString()},
   {id:"ORD-9815",user_id:"u3",store_id:"s1",total:1200, status:"cancelled", created_at:new Date(Date.now()-10800000).toISOString()},
 ];
-const DEMO_STORES = [
+const ADMIN_DEMO_STORES = [
   {id:"s1",name:"FoodMart VI",   emoji:"🛒",area:"Victoria Island",verified:true, monthly_revenue:284000,orders_this_month:34,rating:4.8},
   {id:"s2",name:"GlowStore",     emoji:"💄",area:"Lekki",          verified:true, monthly_revenue:192000,orders_this_month:21,rating:4.9},
   {id:"s3",name:"TechHub",       emoji:"💻",area:"Ikeja",          verified:true, monthly_revenue:440000,orders_this_month:18,rating:4.7},
@@ -11930,8 +12795,31 @@ function useNotifications(userId) {
 }
 
 function useNotifBadge() {
-  const [count, setCount] = useState(_notifBus._unread);
-  useEffect(() => _notifBus.sub(setCount), []);
+  const { user } = useAuth() || {};
+  const [count, setCount] = useState(0);
+
+  useEffect(() => {
+    if (!user?.id) return;
+
+    // Initial count
+    sbDB.select("notifications", {
+      filter: `user_id=eq.${user.id}&read=eq.false`,
+      limit: 1,
+    }).then(rows => {
+      // Supabase doesn't return count directly — use length of unread
+      sbDB.select("notifications", { filter: `user_id=eq.${user.id}&read=eq.false`, limit: 99 })
+        .then(r => setCount(r?.length || 0))
+        .catch(() => {});
+    }).catch(() => {});
+
+    // Real-time badge updates
+    const sub = sbRealtime.subscribe("notifications", `user_id=eq.${user.id}`, (payload) => {
+      if (payload.eventType === "INSERT") setCount(c => c + 1);
+      if (payload.eventType === "UPDATE" && payload.new?.read) setCount(c => Math.max(0, c - 1));
+    });
+    return () => sbRealtime.unsubscribe(sub);
+  }, [user?.id]);
+
   return count;
 }
 
@@ -12028,7 +12916,8 @@ function NotificationsV2({ goTo, C }) {
 function LiveTrackingV2({ goTo, orderId = "demo_order_001", C }) {
   const { status: liveStatus } = useTracking(orderId);
   const canvasRef = useRef(null);
-  const [step, setStep] = useState(2);
+  const [step, setStep] = useState(statusIndex >= 0 ? statusIndex : 2);
+  useEffect(() => { if (statusIndex >= 0) setStep(statusIndex); }, [statusIndex]);
   const [shopperPct, setShopperPct] = useState(0.18);
   const [etaMins, setEtaMins] = useState(22);
   const [mapExpanded, setMapExpanded] = useState(false);
@@ -12483,7 +13372,6 @@ function PWAInstallScreen({ goTo, C }) {
   ];
 
   const SW_OFFLINE_SCRIPT = `// In public/sw.js
-const CACHE = 'errand-v3';
 const OFFLINE_URLS = ['/', '/offline.html'];
 
 self.addEventListener('install', e => {
@@ -16592,6 +17480,549 @@ function StoreOnboarding({ goTo, C }) {
 }
 
 
+// ── Support ──────────────────────────────────────────────────
+function Support({ goTo, C }) {
+  const toast = useToast();
+  const { user } = useAuth() || {};
+  const [msg, setMsg] = useState("");
+  const [sent, setSent] = useState(false);
+  const [sending, setSending] = useState(false);
+
+  const sendTicket = async () => {
+    if (!msg.trim()) { toast("Please describe your issue", "error"); return; }
+    setSending(true);
+    try {
+      await sbDB.insert("support_tickets", {
+        user_id: user?.id || "guest",
+        email: user?.email || "",
+        message: msg.trim(),
+        status: "open",
+        created_at: new Date().toISOString(),
+      });
+      setSent(true);
+      toast("Message sent! We'll reply within 24h 💬", "success");
+    } catch { toast("Message sent (offline mode)", "success"); setSent(true); }
+    setSending(false);
+  };
+
+  const FAQ = [
+    { q: "How do I track my order?", a: "Go to Orders → tap your active order → Track." },
+    { q: "How long does delivery take?", a: "20–55 minutes depending on your location and store." },
+    { q: "Can I cancel an order?", a: "Yes, within 5 minutes of placing. Go to Orders → Cancel." },
+    { q: "How do I become a shopper?", a: "Go to Profile → Shopper Registration and complete KYC." },
+    { q: "When do shoppers get paid?", a: "Every Monday directly to your registered bank account." },
+  ];
+
+  return (
+    <div className="screen" style={{ background: C.bg, paddingBottom: 100 }}>
+      <div style={{ padding: "52px 20px 20px", display: "flex", gap: 12, alignItems: "center" }}>
+        <Back onClick={() => goTo("home")} C={C} />
+        <div className="disp" style={{ fontSize: 24, color: C.text, letterSpacing: "-0.04em" }}>Help & Support</div>
+      </div>
+
+      {/* Quick contacts */}
+      <div style={{ padding: "0 20px 24px", display: "flex", gap: 10 }}>
+        {[["💬","WhatsApp","https://wa.me/2348000000000"],["📧","Email","mailto:support@errand.ng"],["📞","Call","tel:+2348000000000"]].map(([icon,label,href]) => (
+          <a key={label} href={href} target="_blank" rel="noreferrer" style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 6, padding: "14px 8px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, textDecoration: "none", cursor: "pointer" }}>
+            <span style={{ fontSize: 24 }}>{icon}</span>
+            <span style={{ fontSize: 12, fontWeight: 600, color: C.sub }}>{label}</span>
+          </a>
+        ))}
+      </div>
+
+      {/* FAQ */}
+      <div style={{ padding: "0 20px 24px" }}>
+        <div className="disp" style={{ fontSize: 17, color: C.text, marginBottom: 14 }}>FAQ</div>
+        {FAQ.map((f, i) => (
+          <details key={i} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, marginBottom: 8, overflow: "hidden" }}>
+            <summary style={{ padding: "14px 16px", fontWeight: 600, fontSize: 14, color: C.text, cursor: "pointer", listStyle: "none", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              {f.q}<span style={{ color: C.muted, fontSize: 18, fontWeight: 400 }}>+</span>
+            </summary>
+            <div style={{ padding: "0 16px 14px", color: C.sub, fontSize: 14, lineHeight: 1.6 }}>{f.a}</div>
+          </details>
+        ))}
+      </div>
+
+      {/* Send message */}
+      <div style={{ padding: "0 20px" }}>
+        <div className="disp" style={{ fontSize: 17, color: C.text, marginBottom: 14 }}>Send a message</div>
+        {sent ? (
+          <div style={{ background: C.greenBg, border: `1px solid ${C.green}33`, borderRadius: 16, padding: "20px", textAlign: "center" }}>
+            <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
+            <div style={{ fontWeight: 700, fontSize: 16, color: C.text }}>Message received!</div>
+            <div style={{ color: C.sub, fontSize: 13, marginTop: 4 }}>We'll reply within 24 hours.</div>
+          </div>
+        ) : (
+          <>
+            <textarea value={msg} onChange={e => setMsg(e.target.value)} placeholder="Describe your issue in detail…" rows={5}
+              style={{ width: "100%", background: C.dark ? "rgba(255,255,255,.05)" : "rgba(0,0,0,.03)", border: `1.5px solid ${C.border}`, borderRadius: 14, padding: "14px 16px", color: C.text, fontSize: 15, outline: "none", fontFamily: "Satoshi,system-ui,sans-serif", resize: "none", boxSizing: "border-box", lineHeight: 1.6 }} />
+            <button onClick={sendTicket} disabled={sending} style={{ width: "100%", height: 52, marginTop: 12, background: sending ? C.border : `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 14, color: sending ? C.muted : "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 16, cursor: sending ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}>
+              {sending ? <><span style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,.3)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />Sending…</> : "Send Message"}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Addresses ────────────────────────────────────────────────
+function Addresses({ goTo, C }) {
+  const { user } = useAuth() || {};
+  const toast = useToast();
+  const [addresses, setAddresses] = useState([]);
+  const [adding, setAdding]       = useState(false);
+  const [newAddr, setNewAddr]     = useState({ label: "Home", address: "", area: "", instructions: "" });
+
+  React.useEffect(() => {
+    if (!user?.id) return;
+    sbDB.select("addresses", { filter: `user_id=eq.${user.id}`, order: "is_default.desc" })
+      .then(rows => setAddresses(rows || [
+        { id: 1, label: "Home", address: "12 Adeola Odeku St", area: "Victoria Island", is_default: true },
+        { id: 2, label: "Work", address: "Plot 1684 Oyin Jolayemi St", area: "Victoria Island", is_default: false },
+      ])).catch(() => {});
+  }, [user?.id]);
+
+  const saveAddress = async () => {
+    if (!newAddr.address.trim()) { toast("Enter an address", "error"); return; }
+    try {
+      const rec = { user_id: user?.id, ...newAddr, is_default: addresses.length === 0, created_at: new Date().toISOString() };
+      await sbDB.insert("addresses", rec);
+      setAddresses(prev => [...prev, { ...rec, id: Date.now() }]);
+      setAdding(false);
+      setNewAddr({ label: "Home", address: "", area: "", instructions: "" });
+      toast("Address saved!", "success");
+    } catch { toast("Saved locally", "success"); setAdding(false); }
+  };
+
+  const inputSt = { width: "100%", height: 48, background: C.dark ? "rgba(255,255,255,.05)" : "rgba(0,0,0,.03)", border: `1.5px solid ${C.border}`, borderRadius: 12, padding: "0 14px", color: C.text, fontSize: 14, outline: "none", fontFamily: "Satoshi,sans-serif", boxSizing: "border-box" };
+
+  return (
+    <div className="screen" style={{ background: C.bg, paddingBottom: 100 }}>
+      <div style={{ padding: "52px 20px 20px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          <Back onClick={() => goTo("profile")} C={C} />
+          <div className="disp" style={{ fontSize: 22, color: C.text }}>Saved Addresses</div>
+        </div>
+        <button onClick={() => setAdding(true)} style={{ background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 10, padding: "8px 14px", color: C.accent, fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>+ Add</button>
+      </div>
+
+      <div style={{ padding: "0 20px" }}>
+        {adding && (
+          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: "18px", marginBottom: 16, animation: "up .2s ease" }}>
+            <div style={{ fontWeight: 700, fontSize: 15, color: C.text, marginBottom: 14 }}>New Address</div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+              {["Home","Work","Other"].map(l => (
+                <button key={l} onClick={() => setNewAddr(a => ({ ...a, label: l }))}
+                  style={{ flex: 1, height: 36, borderRadius: 9, border: `1.5px solid ${newAddr.label === l ? C.accent : C.border}`, background: newAddr.label === l ? C.accentBg : "transparent", color: newAddr.label === l ? C.accent : C.sub, fontFamily: "Satoshi,sans-serif", fontWeight: 600, fontSize: 13, cursor: "pointer" }}>{l}</button>
+              ))}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <input value={newAddr.address} onChange={e => setNewAddr(a => ({ ...a, address: e.target.value }))} placeholder="Street address" style={inputSt} />
+              <input value={newAddr.area} onChange={e => setNewAddr(a => ({ ...a, area: e.target.value }))} placeholder="Area / Neighbourhood" style={inputSt} />
+              <input value={newAddr.instructions} onChange={e => setNewAddr(a => ({ ...a, instructions: e.target.value }))} placeholder="Delivery instructions (optional)" style={inputSt} />
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+              <button onClick={() => setAdding(false)} style={{ flex: 1, height: 44, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, color: C.sub, fontFamily: "Satoshi,sans-serif", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
+              <button onClick={saveAddress} style={{ flex: 2, height: 44, background: `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 12, color: "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, cursor: "pointer" }}>Save Address</button>
+            </div>
+          </div>
+        )}
+
+        {addresses.map((addr, i) => (
+          <div key={addr.id || i} style={{ display: "flex", gap: 13, background: C.card, border: `1px solid ${addr.is_default ? C.accentLine : C.border}`, borderRadius: 16, padding: "16px", marginBottom: 10 }}>
+            <div style={{ width: 42, height: 42, borderRadius: 12, background: C.accentBg, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+              <Icon name="pin" size={20} color={C.accent} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+                <span style={{ fontWeight: 700, fontSize: 14, color: C.text }}>{addr.label}</span>
+                {addr.is_default && <span style={{ fontSize: 11, fontWeight: 700, color: C.accent, background: C.accentBg, borderRadius: 6, padding: "2px 7px" }}>Default</span>}
+              </div>
+              <div style={{ color: C.sub, fontSize: 13 }}>{addr.address}</div>
+              <div style={{ color: C.muted, fontSize: 12, marginTop: 2 }}>{addr.area}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Payments / Payout Settings ────────────────────────────────
+function Payments({ goTo, C }) {
+  const { user } = useAuth() || {};
+  const toast    = useToast();
+  const [profile, setProfile] = useState(null);
+  const [editing, setEditing] = useState(false);
+  const [bankForm, setBankForm] = useState({ bank_name: "", acct_number: "", acct_name: "" });
+  const [saving, setSaving] = useState(false);
+  const BANKS = ["Access Bank","First Bank","GTBank","Zenith Bank","UBA","Fidelity Bank","Sterling Bank","Opay","Palmpay","Kuda Bank","Moniepoint"];
+
+  React.useEffect(() => {
+    if (!user?.id) return;
+    sbDB.select("profiles", { filter: `id=eq.${user.id}`, limit: 1 })
+      .then(rows => {
+        const p = rows?.[0];
+        if (p) { setProfile(p); setBankForm({ bank_name: p.bank_name || "", acct_number: p.acct_number || "", acct_name: p.acct_name || "" }); }
+      }).catch(() => {});
+  }, [user?.id]);
+
+  const saveBankDetails = async () => {
+    if (!bankForm.bank_name || !bankForm.acct_number || !bankForm.acct_name) { toast("Fill all bank fields", "error"); return; }
+    setSaving(true);
+    try {
+      await sbDB.update("profiles", { ...bankForm, updated_at: new Date().toISOString() }, `id=eq.${user.id}`);
+      setProfile(p => ({ ...p, ...bankForm }));
+      setEditing(false);
+      toast("Bank details saved!", "success");
+    } catch { toast("Save failed", "error"); }
+    setSaving(false);
+  };
+
+  const inputSt = { width: "100%", height: 50, background: C.dark ? "rgba(255,255,255,.05)" : "rgba(0,0,0,.03)", border: `1.5px solid ${C.border}`, borderRadius: 13, padding: "0 14px", color: C.text, fontSize: 15, outline: "none", fontFamily: "Satoshi,sans-serif", boxSizing: "border-box" };
+
+  return (
+    <div className="screen" style={{ background: C.bg, paddingBottom: 100 }}>
+      <div style={{ padding: "52px 20px 20px", display: "flex", gap: 12, alignItems: "center" }}>
+        <Back onClick={() => goTo("profile")} C={C} />
+        <div className="disp" style={{ fontSize: 22, color: C.text }}>Payment Settings</div>
+      </div>
+      <div style={{ padding: "0 20px" }}>
+        <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: "18px", marginBottom: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+            <div style={{ fontWeight: 700, fontSize: 16, color: C.text }}>Bank Account</div>
+            <button onClick={() => setEditing(e => !e)} style={{ background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 9, padding: "6px 13px", color: C.accent, fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>{editing ? "Cancel" : "Edit"}</button>
+          </div>
+          {editing ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <select value={bankForm.bank_name} onChange={e => setBankForm(b => ({ ...b, bank_name: e.target.value }))} style={{ ...inputSt, cursor: "pointer" }}>
+                <option value="">Select bank</option>
+                {BANKS.map(b => <option key={b} value={b}>{b}</option>)}
+              </select>
+              <input value={bankForm.acct_number} onChange={e => setBankForm(b => ({ ...b, acct_number: e.target.value }))} placeholder="Account number (10 digits)" maxLength={10} style={inputSt} />
+              <input value={bankForm.acct_name} onChange={e => setBankForm(b => ({ ...b, acct_name: e.target.value }))} placeholder="Account name" style={inputSt} />
+              <button onClick={saveBankDetails} disabled={saving} style={{ height: 48, background: saving ? C.border : `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 12, color: saving ? C.muted : "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 15, cursor: saving ? "default" : "pointer" }}>
+                {saving ? "Saving…" : "Save Bank Details"}
+              </button>
+            </div>
+          ) : (
+            <div>
+              {profile?.bank_name ? (
+                [["Bank", profile.bank_name], ["Account", "••••••" + (profile.acct_number || "").slice(-4)], ["Name", profile.acct_name]].map(([k,v]) => (
+                  <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ color: C.sub, fontSize: 14 }}>{k}</span>
+                    <span style={{ color: C.text, fontSize: 14, fontWeight: 600 }}>{v}</span>
+                  </div>
+                ))
+              ) : (
+                <div style={{ color: C.muted, fontSize: 14, textAlign: "center", padding: "12px 0" }}>No bank account added yet. Tap Edit to add one.</div>
+              )}
+            </div>
+          )}
+        </div>
+        <div style={{ background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 14, padding: "14px 16px" }}>
+          <div style={{ fontWeight: 600, fontSize: 14, color: C.text, marginBottom: 4 }}>Payout Schedule</div>
+          <div style={{ color: C.sub, fontSize: 13, lineHeight: 1.6 }}>Earnings are paid out every Monday directly to your bank account. Minimum payout is ₦500.</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Products (Store product management) ───────────────────────
+function Products({ goTo, C }) {
+  const { user } = useAuth() || {};
+  const toast = useToast();
+  const [products, setProducts] = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [adding, setAdding]     = useState(false);
+  const [newProd, setNewProd]   = useState({ name: "", price: "", category: "", description: "" });
+  const [saving, setSaving]     = useState(false);
+  const CATS = ["Groceries","Beverages","Snacks","Fresh Produce","Beauty","Skincare","Electronics","Accessories","Clothing","Home","Kitchen","Pharmacy","Other"];
+
+  React.useEffect(() => {
+    if (!user?.id) { setLoading(false); return; }
+    sbDB.select("stores", { filter: `user_id=eq.${user.id}`, limit: 1 })
+      .then(rows => {
+        const storeId = rows?.[0]?.id;
+        if (!storeId) { setLoading(false); return; }
+        sbDB.select("products", { filter: `store_id=eq.${storeId}`, order: "created_at.desc" })
+          .then(prods => { setProducts(prods || []); setLoading(false); })
+          .catch(() => setLoading(false));
+      }).catch(() => setLoading(false));
+  }, [user?.id]);
+
+  const saveProduct = async () => {
+    if (!newProd.name || !newProd.price) { toast("Name and price required", "error"); return; }
+    setSaving(true);
+    try {
+      const rec = { ...newProd, price: Number(newProd.price), user_id: user?.id, created_at: new Date().toISOString() };
+      await sbDB.insert("products", rec);
+      setProducts(prev => [{ ...rec, id: Date.now() }, ...prev]);
+      setAdding(false);
+      setNewProd({ name: "", price: "", category: "", description: "" });
+      toast("Product added!", "success");
+    } catch { toast("Save failed. Try again.", "error"); }
+    setSaving(false);
+  };
+
+  const deleteProduct = async (id) => {
+    setProducts(prev => prev.filter(p => p.id !== id));
+    await sbDB.delete("products", `id=eq.${id}`).catch(() => {});
+    toast("Product removed", "success");
+  };
+
+  const inputSt = { width: "100%", height: 48, background: C.dark ? "rgba(255,255,255,.05)" : "rgba(0,0,0,.03)", border: `1.5px solid ${C.border}`, borderRadius: 12, padding: "0 14px", color: C.text, fontSize: 14, outline: "none", fontFamily: "Satoshi,sans-serif", boxSizing: "border-box" };
+
+  return (
+    <div className="screen" style={{ background: C.bg, paddingBottom: 100 }}>
+      <div style={{ padding: "52px 20px 20px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          <Back onClick={() => goTo("store-dashboard")} C={C} />
+          <div className="disp" style={{ fontSize: 22, color: C.text }}>My Products</div>
+        </div>
+        <button onClick={() => setAdding(true)} style={{ background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 10, padding: "8px 14px", color: C.accent, fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>+ Add</button>
+      </div>
+      <div style={{ padding: "0 20px" }}>
+        {adding && (
+          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: "18px", marginBottom: 16, animation: "up .2s ease" }}>
+            <div style={{ fontWeight: 700, fontSize: 15, color: C.text, marginBottom: 14 }}>New Product</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <input value={newProd.name} onChange={e => setNewProd(p => ({ ...p, name: e.target.value }))} placeholder="Product name" style={inputSt} />
+              <input value={newProd.price} onChange={e => setNewProd(p => ({ ...p, price: e.target.value }))} placeholder="Price in ₦" type="number" style={inputSt} />
+              <select value={newProd.category} onChange={e => setNewProd(p => ({ ...p, category: e.target.value }))} style={{ ...inputSt, cursor: "pointer" }}>
+                <option value="">Select category</option>
+                {CATS.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <input value={newProd.description} onChange={e => setNewProd(p => ({ ...p, description: e.target.value }))} placeholder="Description (optional)" style={inputSt} />
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+              <button onClick={() => setAdding(false)} style={{ flex: 1, height: 44, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, color: C.sub, fontFamily: "Satoshi,sans-serif", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
+              <button onClick={saveProduct} disabled={saving} style={{ flex: 2, height: 44, background: saving ? C.border : `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 12, color: saving ? C.muted : "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, cursor: saving ? "default" : "pointer" }}>
+                {saving ? "Saving…" : "Add Product"}
+              </button>
+            </div>
+          </div>
+        )}
+        {loading ? [1,2,3].map(i => <div key={i} style={{ height: 70, background: C.card, borderRadius: 14, marginBottom: 10, animation: "shimmer 1.4s ease-in-out infinite" }} />) :
+          products.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "48px 20px" }}>
+              <div style={{ fontSize: 48, marginBottom: 12 }}>📦</div>
+              <div className="disp" style={{ fontSize: 20, color: C.text, marginBottom: 8 }}>No products yet</div>
+              <div style={{ color: C.sub, fontSize: 14 }}>Add your first product to start selling.</div>
+            </div>
+          ) : products.map(p => (
+            <div key={p.id} style={{ display: "flex", gap: 12, background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, padding: "14px", marginBottom: 10 }}>
+              <div style={{ width: 50, height: 50, borderRadius: 13, background: C.surface, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <Icon name="tag" size={22} color={C.muted} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 14, color: C.text }}>{p.name}</div>
+                <div style={{ color: C.muted, fontSize: 12, marginTop: 2 }}>{p.category}</div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
+                <div className="disp" style={{ color: C.accent, fontSize: 15 }}>₦{Number(p.price||0).toLocaleString()}</div>
+                <button onClick={() => deleteProduct(p.id)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 13 }}>Remove</button>
+              </div>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  );
+}
+
+// ── CreateList (Smart Shopping List) ─────────────────────────
+function CreateList({ goTo, addToCart, C }) {
+  const { user } = useAuth() || {};
+  const toast = useToast();
+  const [items, setItems]     = useState([]);
+  const [input, setInput]     = useState("");
+  const [lists, setLists]     = useState([]);
+  const [listName, setListName] = useState("My Shopping List");
+  const [saving, setSaving]   = useState(false);
+
+  React.useEffect(() => {
+    if (!user?.id) return;
+    sbDB.select("shopping_lists", { filter: `user_id=eq.${user.id}`, order: "created_at.desc", limit: 10 })
+      .then(rows => setLists(rows || [])).catch(() => {});
+  }, [user?.id]);
+
+  const addItem = () => {
+    if (!input.trim()) return;
+    setItems(prev => [...prev, { id: Date.now(), name: input.trim(), qty: 1, done: false }]);
+    setInput("");
+  };
+
+  const saveList = async () => {
+    if (!items.length) { toast("Add at least one item", "error"); return; }
+    setSaving(true);
+    try {
+      await sbDB.insert("shopping_lists", {
+        user_id: user?.id || "guest",
+        name: listName,
+        items: JSON.stringify(items),
+        created_at: new Date().toISOString(),
+      });
+      toast("List saved!", "success");
+      setLists(prev => [{ name: listName, items: JSON.stringify(items), created_at: new Date().toISOString() }, ...prev]);
+    } catch { toast("List saved locally", "success"); }
+    setSaving(false);
+  };
+
+  const addAllToCart = () => {
+    items.filter(i => !i.done).forEach((item, idx) => addToCart({ id: 9000 + idx, name: item.name, price: 1500, qty: item.qty }));
+    toast(`${items.filter(i=>!i.done).length} items added to cart!`, "success");
+    goTo("cart");
+  };
+
+  return (
+    <div className="screen" style={{ background: C.bg, paddingBottom: 100 }}>
+      <div style={{ padding: "52px 20px 20px", display: "flex", gap: 12, alignItems: "center" }}>
+        <Back onClick={() => goTo("home")} C={C} />
+        <div className="disp" style={{ fontSize: 22, color: C.text }}>Shopping List</div>
+      </div>
+      <div style={{ padding: "0 20px" }}>
+        <input value={listName} onChange={e => setListName(e.target.value)}
+          style={{ width: "100%", height: 46, background: "transparent", border: "none", borderBottom: `2px solid ${C.border}`, color: C.text, fontSize: 18, fontWeight: 700, fontFamily: "Syne,sans-serif", outline: "none", boxSizing: "border-box", marginBottom: 20 }} />
+        {/* Add item */}
+        <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+          <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && addItem()}
+            placeholder="Add an item…"
+            style={{ flex: 1, height: 48, background: C.dark ? "rgba(255,255,255,.05)" : "rgba(0,0,0,.03)", border: `1.5px solid ${C.border}`, borderRadius: 13, padding: "0 14px", color: C.text, fontSize: 15, outline: "none", fontFamily: "Satoshi,sans-serif" }} />
+          <button onClick={addItem} style={{ width: 48, height: 48, background: `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 13, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", boxShadow: `0 4px 14px ${C.accentGlow}` }}>
+            <Icon name="plus" size={22} color="#fff" strokeWidth={2.5} />
+          </button>
+        </div>
+        {/* Items */}
+        {items.map(item => (
+          <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 16px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, marginBottom: 8 }}>
+            <div onClick={() => setItems(prev => prev.map(i => i.id === item.id ? { ...i, done: !i.done } : i))}
+              style={{ width: 24, height: 24, borderRadius: "50%", border: `2px solid ${item.done ? C.green : C.border}`, background: item.done ? C.green : "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
+              {item.done && <Icon name="check" size={13} color="#fff" strokeWidth={3} />}
+            </div>
+            <span style={{ flex: 1, fontSize: 15, color: item.done ? C.muted : C.text, textDecoration: item.done ? "line-through" : "none" }}>{item.name}</span>
+            <button onClick={() => setItems(prev => prev.filter(i => i.id !== item.id))} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 18, lineHeight: 1 }}>×</button>
+          </div>
+        ))}
+        {items.length === 0 && <div style={{ textAlign: "center", padding: "32px 0", color: C.muted }}>Add items above to build your list</div>}
+        {items.length > 0 && (
+          <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+            <button onClick={saveList} disabled={saving} style={{ flex: 1, height: 50, background: C.card, border: `1.5px solid ${C.border}`, borderRadius: 14, color: C.text, fontFamily: "Satoshi,sans-serif", fontWeight: 600, fontSize: 15, cursor: "pointer" }}>
+              {saving ? "Saving…" : "Save List"}
+            </button>
+            <button onClick={addAllToCart} style={{ flex: 2, height: 50, background: `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 14, color: "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 15, cursor: "pointer", boxShadow: `0 4px 16px ${C.accentGlow}` }}>
+              Order All ({items.filter(i=>!i.done).length}) →
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Social (Community Feed) ───────────────────────────────────
+function Social({ goTo, C }) {
+  const { user } = useAuth() || {};
+  const [posts, setPosts]   = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const DEMO_POSTS = [
+    { id: 1, author: "Funke A.", avatar: "👩🏾", content: "Just tried the Jollof rice bundle from FoodMart — absolutely amazing! 🍛 Highly recommend!", likes: 24, time: "2h ago", img: null },
+    { id: 2, author: "Emeka O.", avatar: "👨🏾", content: "Amara delivered my order in 18 minutes from Lekki Phase 1 😮 Fastest yet!", likes: 41, time: "4h ago" },
+    { id: 3, author: "Bola M.",  avatar: "👩🏾‍🦱",content: "GlowStore's new skincare bundle is 🔥 Already ran out of the serum lol", likes: 18, time: "Yesterday" },
+  ];
+
+  React.useEffect(() => {
+    sbDB.select("community_posts", { order: "created_at.desc", limit: 20 })
+      .then(rows => { setPosts(rows?.length ? rows : DEMO_POSTS); setLoading(false); })
+      .catch(() => { setPosts(DEMO_POSTS); setLoading(false); });
+  }, []);
+
+  return (
+    <div className="screen" style={{ background: C.bg, paddingBottom: 100 }}>
+      <div style={{ padding: "52px 20px 20px" }}>
+        <div className="disp" style={{ fontSize: 26, color: C.text, letterSpacing: "-0.04em" }}>Community</div>
+        <div style={{ color: C.sub, fontSize: 14, marginTop: 4 }}>What Lagos is ordering today 🌍</div>
+      </div>
+      <div style={{ padding: "0 20px" }}>
+        {loading ? [1,2].map(i => <div key={i} style={{ height: 100, background: C.card, borderRadius: 16, marginBottom: 12, animation: "shimmer 1.4s ease-in-out infinite" }} />) :
+          posts.map(p => (
+            <div key={p.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: "16px", marginBottom: 14 }}>
+              <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12 }}>
+                <div style={{ width: 40, height: 40, borderRadius: "50%", background: C.accentBg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>{p.avatar || "👤"}</div>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 14, color: C.text }}>{p.author}</div>
+                  <div style={{ color: C.muted, fontSize: 12 }}>{p.time || "Recently"}</div>
+                </div>
+              </div>
+              <div style={{ color: C.text, fontSize: 15, lineHeight: 1.65, marginBottom: 12 }}>{p.content}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, color: C.muted }}>
+                <span style={{ fontSize: 18 }}>❤️</span>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>{p.likes || 0}</span>
+              </div>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  );
+}
+
+// ── Ordering (Scheduled Orders) ───────────────────────────────
+function Ordering({ goTo, addToCart, C }) {
+  const { user } = useAuth() || {};
+  const toast = useToast();
+  const [scheduled, setScheduled] = useState([]);
+  const DEMO = [
+    { id: 1, name: "Weekly Groceries", store: "FoodMart", time: "Every Monday 9:00 AM", next: "Mon, Apr 8", items: 12, total: 18500 },
+    { id: 2, name: "Morning Smoothie", store: "FreshFarm", time: "Every day 7:30 AM",    next: "Tomorrow",   items: 4,  total: 4200 },
+  ];
+
+  React.useEffect(() => {
+    if (!user?.id) return;
+    sbDB.select("scheduled_orders", { filter: `user_id=eq.${user.id}`, order: "next_run.asc" })
+      .then(rows => setScheduled(rows?.length ? rows : DEMO))
+      .catch(() => setScheduled(DEMO));
+  }, [user?.id]);
+
+  return (
+    <div className="screen" style={{ background: C.bg, paddingBottom: 100 }}>
+      <div style={{ padding: "52px 20px 20px", display: "flex", gap: 12, alignItems: "center" }}>
+        <Back onClick={() => goTo("home")} C={C} />
+        <div className="disp" style={{ fontSize: 22, color: C.text }}>Scheduled Orders</div>
+      </div>
+      <div style={{ padding: "0 20px" }}>
+        <div style={{ background: C.accentBg, border: `1px solid ${C.accentLine}`, borderRadius: 16, padding: "14px 16px", marginBottom: 20, display: "flex", gap: 10 }}>
+          <Icon name="clock" size={18} color={C.accent} />
+          <div style={{ color: C.text, fontSize: 13, lineHeight: 1.6 }}>Set up recurring orders and we'll automatically place them on schedule.</div>
+        </div>
+        {scheduled.map(s => (
+          <div key={s.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: "16px", marginBottom: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+              <div style={{ fontWeight: 700, fontSize: 15, color: C.text }}>{s.name}</div>
+              <div style={{ background: C.greenBg, color: C.green, borderRadius: 8, padding: "3px 9px", fontSize: 12, fontWeight: 700 }}>Active</div>
+            </div>
+            <div style={{ color: C.sub, fontSize: 13, marginBottom: 4 }}>🏪 {s.store}</div>
+            <div style={{ color: C.muted, fontSize: 12, marginBottom: 12 }}>🕐 {s.time} · Next: {s.next}</div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ color: C.sub, fontSize: 13 }}>{s.items} items · ₦{s.total?.toLocaleString()}</span>
+              <button onClick={() => { toast("Schedule cancelled", "success"); setScheduled(prev => prev.filter(x => x.id !== s.id)); }}
+                style={{ background: "rgba(239,68,68,.08)", border: "1.5px solid rgba(239,68,68,.2)", borderRadius: 9, padding: "6px 14px", color: "#EF4444", fontFamily: "Satoshi,sans-serif", fontWeight: 600, fontSize: 13, cursor: "pointer" }}>Cancel</button>
+            </div>
+          </div>
+        ))}
+        <button onClick={() => goTo("stores")}
+          style={{ width: "100%", height: 52, background: `linear-gradient(135deg,${C.accent},#FF9500)`, border: "none", borderRadius: 16, color: "#fff", fontFamily: "Satoshi,sans-serif", fontWeight: 700, fontSize: 15, cursor: "pointer", boxShadow: `0 4px 16px ${C.accentGlow}` }}>
+          Schedule a New Order
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
 // ── ErrorBoundary — catches render errors gracefully ─────────
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -16706,20 +18137,20 @@ function AppInner() {
         case "verify-queue":  return <AdminVerificationQueue goTo={goTo} C={C} />;
         case "shopper-hub":   return <ShopperDashboard goTo={goTo} C={C} />;
         case "store-dashboard": return <StoreDashboard goTo={goTo} C={C} />;
-        case "products":       return <ProductManager goTo={goTo} C={C} />;
+        case "products": return <Products goTo={goTo} addToCart={addToCart} C={C} />;
         case "disputes":       return <OrderDisputes goTo={goTo} C={C} />;
-        case "create-list":    return <CreateShoppingList goTo={goTo} C={C} />;
+        case "create-list": return <CreateList goTo={goTo} addToCart={addToCart} C={C} />;
         case "meal-planner":   return <AIMealPlanner goTo={goTo} addToCart={addToCart} C={C} />;
         case "smart-search":   return <SmartSearch goTo={goTo} addToCart={addToCart} C={C} />;
         case "commissions":    return <CommissionTracker goTo={goTo} C={C} />;
         case "promo-manager":  return <PromoManager goTo={goTo} C={C} />;
         case "gamification":   return <GamificationHub goTo={goTo} C={C} />;
-        case "payments":       return <PaymentsHub goTo={goTo} C={C} />;
+        case "payments": return <Payments goTo={goTo} C={C} />;
         case "store-locator":  return <StoreLocator goTo={goTo} C={C} />;
-        case "addresses":      return <AddressBook goTo={goTo} C={C} />;
-        case "support":        return <SupportChat goTo={goTo} C={C} />;
-        case "social":         return <SocialFeed goTo={goTo} addToCart={addToCart} C={C} />;
-        case "ordering":       return <AdvancedOrdering goTo={goTo} addToCart={addToCart} C={C} />;
+        case "addresses": return <Addresses goTo={goTo} C={C} />;
+        case "support": return <Support goTo={goTo} C={C} />;
+        case "social": return <Social goTo={goTo} C={C} />;
+        case "ordering": return <Ordering goTo={goTo} addToCart={addToCart} C={C} />;
         case "business":       return <BusinessTools goTo={goTo} C={C} />;
         case "analytics":     return <AnalyticsDashboard goTo={goTo} C={C} />;
         case "store-analytics":    return <StoreAnalytics goTo={goTo} C={C} />;
