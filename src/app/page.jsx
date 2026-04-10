@@ -1482,16 +1482,14 @@ function useRealTimeLocation() {
 
   const reverseGeocode = async (lat, lng) => {
     try {
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`,
-        { headers: { "Accept-Language": "en" } }
-      );
-      const data = await res.json();
-      const addr = data.address || {};
-      const area = addr.suburb || addr.neighbourhood || addr.quarter ||
-                   addr.city_district || addr.town || addr.village || null;
-      const city = addr.city || addr.state_district || addr.state || "Lagos";
-      setLocation(prev => ({ ...prev, area, city, loading: false }));
+      // Use our Next.js proxy to avoid CORS issues
+      const res = await fetch(`/api/location?lat=${lat}&lng=${lng}`);
+      if (res.ok) {
+        const data = await res.json();
+        setLocation(prev => ({ ...prev, area: data.area, city: data.city || "Lagos", loading: false }));
+      } else {
+        setLocation(prev => ({ ...prev, loading: false }));
+      }
     } catch {
       setLocation(prev => ({ ...prev, loading: false }));
     }
@@ -1939,7 +1937,7 @@ function useStores() {
     })
     .then(rows => {
       if (rows && rows.length > 0) {
-        setStores(rows.map(r => ({
+        setStores((rows || []).map(r => ({
           id: r.id,
           name: r.store_name || r.name,
           emoji: r.emoji || "🏪",
@@ -2691,8 +2689,8 @@ function Tracking({ goTo, C }) {
   const activeOrder = orders.find(o => !["delivered","cancelled"].includes(o.status)) || orders[0];
   const { status: liveStatus, statusIndex, progress, eta, STATUSES } = useTracking(activeOrder?.id || "demo_order_001");
   const userLoc = useRealTimeLocation();
-  const [step, setStep] = useState(statusIndex >= 0 ? statusIndex : 2);
-  useEffect(() => { if (statusIndex >= 0) setStep(statusIndex); }, [statusIndex]);
+  const [step, setStep] = useState(2);
+  useEffect(() => { if (typeof statusIndex === 'number' && statusIndex >= 0) setStep(statusIndex); }, [statusIndex]);
   const steps = [
     { label: "Placed",     icon: "receipt", time: "2:30 PM"      },
     { label: "Confirmed",  icon: "check",   time: "2:35 PM"      },
@@ -4056,7 +4054,7 @@ function Profile({ goTo, C, dark, toggleDark }) {
         {/* Stats row */}
         <div style={{ display: "flex", gap: 10 }}>
           {[
-            { label: "Orders",  value: profile?.order_count  || "0" },
+            { label: "Orders",  value: String(profile?.order_count || 0) },
             { label: "Points",  value: (profile?.loyalty_points || 0).toLocaleString() },
             { label: "Wallet",  value: `₦${((profile?.wallet_balance || 0) / 100).toLocaleString()}` },
           ].map(s => (
@@ -4145,7 +4143,7 @@ function OrderHistory({ goTo, addToCart, C }) {
     status: o.status || "pending",
     payStatus: o.payment_ref ? "paid" : "unpaid",
     total: o.total || 0,
-    items: o.items ? (typeof o.items === "string" ? JSON.parse(o.items) : o.items).map(i => i.name || i) : [],
+    items: o.items ? (typeof o.items === "string" ? (typeof o.items === "string" ? JSON.parse(o.items) : o.items || []) : o.items).map(i => i.name || i) : [],
     rating: o.rating || null,
   })) : DEMO_ORDERS;
 
@@ -4881,8 +4879,8 @@ function LiveMapCanvas({ shopperPos, customerPos, eta, step, C }) {
 // ── LiveTracking: full tracking screen with realtime map ─────
 function LiveTracking({ goTo, orderId = "demo_order_001", C }) {
   const { status: liveStatus } = useTracking(orderId);
-  const [step, setStep] = useState(statusIndex >= 0 ? statusIndex : 2);
-  useEffect(() => { if (statusIndex >= 0) setStep(statusIndex); }, [statusIndex]);
+  const [step, setStep] = useState(2);
+  useEffect(() => { if (typeof statusIndex === 'number' && statusIndex >= 0) setStep(statusIndex); }, [statusIndex]);
   const [eta, setEta] = useState("18 min");
   const [expanded, setExpanded] = useState(false);
   const { pos: customerPos, request: requestCustomerLoc } = useCustomerLocation();
@@ -5748,9 +5746,9 @@ function ShopperDashboard({ goTo, C }) {
         {/* Earnings stats */}
         <div style={{ display: "flex", gap: 10 }}>
           {[
-            { label: "Today",   value: `₦${earnings.today.toLocaleString()}`,   color: C.green  },
-            { label: "This Week",value: `₦${earnings.week.toLocaleString()}`,   color: C.accent },
-            { label: "Pending", value: `₦${earnings.pending.toLocaleString()}`, color: "#F5C842"},
+            { label: "Today",   value: `₦${(earnings.today/100).toLocaleString()}`,   color: C.green  },
+            { label: "This Week",value: `₦${(earnings.week/100).toLocaleString()}`,   color: C.accent },
+            { label: "Pending", value: `₦${(earnings.pending/100).toLocaleString()}`, color: "#F5C842"},
           ].map(s => (
             <div key={s.label} style={{ flex: 1, background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 10px", textAlign: "center" }}>
               <div className="disp" style={{ fontSize: 16, color: s.color, letterSpacing: "-0.03em" }}>{s.value}</div>
@@ -7250,7 +7248,7 @@ function StoreDashboard({ goTo, C }) {
         <div style={{ display: "flex", gap: 10 }}>
           {[
             { label: "Pending",      value: pendingCount, color: "#F5C842" },
-            { label: "Today Revenue",value: `₦${todayRevenue.toLocaleString()}`, color: C.green },
+            { label: "Today Revenue",value: `₦${(todayRevenue/100).toLocaleString()}`, color: C.green },
             { label: "Total Orders", value: totalOrders, color: C.accent },
           ].map(s => (
             <div key={s.label} style={{ flex: 1, background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 10px", textAlign: "center" }}>
@@ -7277,7 +7275,7 @@ function StoreDashboard({ goTo, C }) {
           ? [1,2,3].map(i => <div key={i} style={{ height: 80, background: C.card, borderRadius: 16, marginBottom: 10, animation: "shimmer 1.4s ease-in-out infinite" }} />)
           : orders.map(o => {
             const sc = STATUS_COLOR[o.status] || STATUS_COLOR.pending;
-            const items = o.items ? (Array.isArray(o.items) ? o.items : (typeof o.items === "string" ? JSON.parse(o.items) : [])) : [];
+            const items = o.items ? (Array.isArray(o.items) ? o.items : (typeof o.items === "string" ? (typeof o.items === "string" ? JSON.parse(o.items) : o.items || []) : [])) : [];
             return (
               <div key={o.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: "16px", marginBottom: 12, animation: "up .2s ease" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
@@ -7923,7 +7921,7 @@ Return ONLY valid JSON (no markdown):
         <div style={{ padding: "0 20px" }}>
           <div style={{ color: C.muted, fontSize: 12, fontWeight: 700, letterSpacing: 1, marginBottom: 10 }}>RESULTS FOR "{q.toUpperCase()}"</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 9, marginBottom: 18 }}>
-            {results.map((r, i) => (
+            {(results || []).map((r, i) => (
               <div key={i} className="tap" style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 13, padding: "12px 14px", display: "flex", gap: 12, alignItems: "center" }}>
                 <div style={{ width: 44, height: 44, borderRadius: 12, background: C.surface, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, flexShrink: 0 }}>{r.emoji}</div>
                 <div style={{ flex: 1 }}>
@@ -12801,16 +12799,10 @@ function useNotifBadge() {
   useEffect(() => {
     if (!user?.id) return;
 
-    // Initial count
-    sbDB.select("notifications", {
-      filter: `user_id=eq.${user.id}&read=eq.false`,
-      limit: 1,
-    }).then(rows => {
-      // Supabase doesn't return count directly — use length of unread
-      sbDB.select("notifications", { filter: `user_id=eq.${user.id}&read=eq.false`, limit: 99 })
-        .then(r => setCount(r?.length || 0))
-        .catch(() => {});
-    }).catch(() => {});
+    // Initial unread count
+    sbDB.select("notifications", { filter: `user_id=eq.${user.id}&read=eq.false`, limit: 99 })
+      .then(r => setCount(r?.length || 0))
+      .catch(() => {});
 
     // Real-time badge updates
     const sub = sbRealtime.subscribe("notifications", `user_id=eq.${user.id}`, (payload) => {
@@ -12916,8 +12908,8 @@ function NotificationsV2({ goTo, C }) {
 function LiveTrackingV2({ goTo, orderId = "demo_order_001", C }) {
   const { status: liveStatus } = useTracking(orderId);
   const canvasRef = useRef(null);
-  const [step, setStep] = useState(statusIndex >= 0 ? statusIndex : 2);
-  useEffect(() => { if (statusIndex >= 0) setStep(statusIndex); }, [statusIndex]);
+  const [step, setStep] = useState(2);
+  useEffect(() => { if (typeof statusIndex === 'number' && statusIndex >= 0) setStep(statusIndex); }, [statusIndex]);
   const [shopperPct, setShopperPct] = useState(0.18);
   const [etaMins, setEtaMins] = useState(22);
   const [mapExpanded, setMapExpanded] = useState(false);
@@ -13602,7 +13594,7 @@ function QAPanel({ C, onClose }) {
               <button onClick={runChecks} disabled={running} style={{ width: "100%", padding: "12px", background: running ? C.border : C.accent, border: "none", borderRadius: 12, color: running ? C.muted : "#fff", fontFamily: "Satoshi,system-ui,sans-serif", fontWeight: 700, fontSize: 14, cursor: running ? "default" : "pointer", marginBottom: 14 }}>
                 {running ? "Running checks…" : results.length ? "Run again" : "🧪 Run health checks"}
               </button>
-              {results.map((r, i) => (
+              {(results || []).map((r, i) => (
                 <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
                   <span style={{ fontSize: 16, flexShrink: 0 }}>{statusIcon(r.status)}</span>
                   <div style={{ flex: 1 }}>
@@ -17982,7 +17974,7 @@ function Ordering({ goTo, addToCart, C }) {
 
   React.useEffect(() => {
     if (!user?.id) return;
-    sbDB.select("scheduled_orders", { filter: `user_id=eq.${user.id}`, order: "next_run.asc" })
+    sbDB.select("scheduled_orders", { filter: `user_id=eq.${user.id}`, order: "created_at.desc", limit: 20 })
       .then(rows => setScheduled(rows?.length ? rows : DEMO))
       .catch(() => setScheduled(DEMO));
   }, [user?.id]);
